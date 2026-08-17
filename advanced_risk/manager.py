@@ -19,6 +19,8 @@ class AdvancedRiskManager:
         self.current_balance: float = 0.0
         self._daily_date: str = utc_now().date().isoformat()
         self._lock = asyncio.Lock()
+        self._paused: bool = False
+        self._pause_reason: str = ""
 
     def _reset_daily_if_needed(self):
         today = utc_now().date().isoformat()
@@ -27,9 +29,38 @@ class AdvancedRiskManager:
             self._daily_date = today
             logger.info("Kunlik hisoblagichlar yangilandi")
 
+    def pause(self, reason: str = ""):
+        """Risk menejerni pauzaga qo'yadi (yangi savdolar bloklanadi)."""
+        self._paused = True
+        self._pause_reason = reason or "Manual pause"
+        logger.warning("AdvancedRiskManager PAUSED: {}".format(self._pause_reason))
+
+    def resume(self):
+        """Pauzani olib tashlaydi va consecutive losses hisoblagichini nolga tushiradi."""
+        was_paused = self._paused
+        self._paused = False
+        self._pause_reason = ""
+        self.consecutive_losses = 0
+        if was_paused:
+            logger.info("AdvancedRiskManager RESUMED (consecutive_losses reset)")
+        else:
+            logger.info("AdvancedRiskManager resume chaqirildi (allaqachon aktiv edi)")
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    @property
+    def pause_reason(self) -> str:
+        return self._pause_reason
+
     async def pre_trade_check(self, token: str, amount_usd: float) -> Tuple[bool, str]:
         async with self._lock:
             self._reset_daily_if_needed()
+
+            # Manual / auto pause
+            if self._paused:
+                return False, "Paused: {}".format(self._pause_reason or "risk pause")
 
             # Emergency stop
             if settings.EMERGENCY_STOP:
@@ -43,15 +74,19 @@ class AdvancedRiskManager:
             if self.daily_trades >= settings.MAX_DAILY_TRADES:
                 return False, "Kunlik savdolar limiti: {}".format(settings.MAX_DAILY_TRADES)
 
-            # Consecutive losses
+            # Consecutive losses — avtomatik pause
             if self.consecutive_losses >= settings.MAX_CONSECUTIVE_LOSSES:
-                return False, "Ketma-ket {}ta zarar — to'xtatildi".format(self.consecutive_losses)
+                reason = "Ketma-ket {}ta zarar — to'xtatildi".format(self.consecutive_losses)
+                self.pause(reason)
+                return False, reason
 
             # Max drawdown
             if self.peak_balance > 0 and self.current_balance > 0:
                 drawdown = (self.peak_balance - self.current_balance) / self.peak_balance
                 if drawdown >= settings.MAX_DRAWDOWN_PCT:
-                    return False, "Max drawdown: {:.1f}%".format(drawdown * 100)
+                    reason = "Max drawdown: {:.1f}%".format(drawdown * 100)
+                    self.pause(reason)
+                    return False, reason
 
             # Base risk check
             ok, reason = await self.base.pre_trade_check(token, amount_usd)
@@ -99,6 +134,9 @@ class AdvancedRiskManager:
                 (self.peak_balance - self.current_balance) / self.peak_balance * 100, 2
             ) if self.peak_balance > 0 else 0,
             "emergency_stop": settings.EMERGENCY_STOP,
+            "paused": self._paused,
+            "pause_reason": self._pause_reason,
+            "max_daily_trades": getattr(settings, "MAX_DAILY_TRADES", None),
         }
 
     async def get_risk_summary(self) -> Dict[str, Any]:
@@ -113,4 +151,8 @@ class AdvancedRiskManager:
                 (self.peak_balance - self.current_balance) / self.peak_balance * 100, 2
             ) if self.peak_balance > 0 else 0,
             "emergency_stop": settings.EMERGENCY_STOP,
+            "paused": self._paused,
+            "pause_reason": self._pause_reason,
+            "max_daily_trades": getattr(settings, "MAX_DAILY_TRADES", None),
         }
+
