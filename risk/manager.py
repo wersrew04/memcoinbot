@@ -1,96 +1,158 @@
-"""Risk Manager — ochiq pozitsiyalar, kunlik zarar, cooldown."""
+"""
+Advanced Risk Manager — kengaytirilgan risk boshqaruvi.
+Kunlik savdolar, consecutive losses, drawdown, emergency stop.
+"""
 from __future__ import annotations
 import asyncio
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 from utils.logger import logger
 from utils.helpers import utc_now, safe_float
 from config.settings import settings
 
-class RiskManager:
-    def __init__(self):
-        self._positions: Dict[str, Dict] = {}
-        self._cooldowns: Dict[str, datetime] = {}
-        self._processed: set = set()
-        self._daily_loss_usd: float = 0.0
+
+class AdvancedRiskManager:
+    def __init__(self, base_risk_manager):
+        self.base = base_risk_manager
+        self.daily_trades: int = 0
+        self.consecutive_losses: int = 0
+        self.peak_balance: float = 0.0
+        self.current_balance: float = 0.0
         self._daily_date: str = utc_now().date().isoformat()
         self._lock = asyncio.Lock()
-        self._running: bool = True
+        self._paused: bool = False
+        self._pause_reason: str = ""
 
     def _reset_daily_if_needed(self):
         today = utc_now().date().isoformat()
         if self._daily_date != today:
-            self._daily_loss_usd = 0.0
+            self.daily_trades = 0
             self._daily_date = today
+            logger.info("Kunlik hisoblagichlar yangilandi")
+
+    def pause(self, reason: str = ""):
+        """Risk menejerni pauzaga qo'yadi (yangi savdolar bloklanadi)."""
+        self._paused = True
+        self._pause_reason = reason or "Manual pause"
+        logger.warning("AdvancedRiskManager PAUSED: {}".format(self._pause_reason))
+
+    def resume(self):
+        """Pauzani olib tashlaydi va consecutive losses hisoblagichini nolga tushiradi."""
+        was_paused = self._paused
+        self._paused = False
+        self._pause_reason = ""
+        self.consecutive_losses = 0
+        if was_paused:
+            logger.info("AdvancedRiskManager RESUMED (consecutive_losses reset)")
+        else:
+            logger.info("AdvancedRiskManager resume chaqirildi (allaqachon aktiv edi)")
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    @property
+    def pause_reason(self) -> str:
+        return self._pause_reason
 
     async def pre_trade_check(self, token: str, amount_usd: float) -> Tuple[bool, str]:
         async with self._lock:
-            if not self._running:
+            self._reset_daily_if_needed()
+
+            # Manual / auto pause
+            if self._paused:
+                return False, "Paused: {}".format(self._pause_reason or "risk pause")
+
+            # Emergency stop
+            if settings.EMERGENCY_STOP:
+                return False, "Emergency stop faol"
+
+            # Bot ishlamayotgan bo'lsa
+            if not settings.BOT_RUNNING:
                 return False, "Bot to'xtatilgan"
-            self._reset_daily_if_needed()
-            if len(self._positions) >= settings.MAX_OPEN_POSITIONS:
-                return False, f"Max ochiq pozitsiya: {settings.MAX_OPEN_POSITIONS}"
-            if self._daily_loss_usd >= settings.MAX_DAILY_LOSS_USD:
-                return False, f"Kunlik zarar limiti: ${settings.MAX_DAILY_LOSS_USD}"
-            if token in self._positions:
-                return False, "Pozitsiya allaqachon ochiq"
-            if token in self._cooldowns:
-                diff = (utc_now() - self._cooldowns[token]).total_seconds() / 60
-                if diff < settings.COOLDOWN_MINUTES:
-                    return False, f"Cooldown: {settings.COOLDOWN_MINUTES - int(diff)} daqiqa qoldi"
-            if token in self._processed:
-                return False, "Token allaqachon qayta ishlangan"
-            return True, "OK"
 
-    async def open_position(self, token: str, data: Dict) -> bool:
-        async with self._lock:
-            if token in self._positions:
-                return False
-            self._positions[token] = {**data, "opened_at": utc_now().isoformat()}
-            self._processed.add(token)
-            logger.info(f"Pozitsiya ochildi: {data.get('symbol', token[:8])}")
-            return True
+            # Kunlik savdolar limiti
+            if self.daily_trades >= settings.MAX_DAILY_TRADES:
+                return False, "Kunlik savdolar limiti: {}".format(settings.MAX_DAILY_TRADES)
 
-    async def close_position(self, token: str, pnl_usd: float):
-        async with self._lock:
-            if token not in self._positions:
-                return None
-            pos = self._positions.pop(token)
-            self._cooldowns[token] = utc_now()
-            self._reset_daily_if_needed()
-            if pnl_usd < 0:
-                self._daily_loss_usd += abs(pnl_usd)
-            logger.info(f"Pozitsiya yopildi: {pos.get('symbol', token[:8])} PnL=${pnl_usd:+.2f}")
-            return pos
+            # Consecutive losses — avtomatik pause
+            if self.consecutive_losses >= settings.MAX_CONSECUTIVE_LOSSES:
+                reason = "Ketma-ket {}ta zarar — to'xtatildi".format(self.consecutive_losses)
+                self.pause(reason)
+                return False, reason
 
-    async def update_position(self, token: str, updates: Dict):
-        async with self._lock:
-            if token in self._positions:
-                self._positions[token].update(updates)
+            # Max drawdown
+            if self.peak_balance > 0 and self.current_balance > 0:
+                drawdown = (self.peak_balance - self.current_balance) / self.peak_balance
+                if drawdown >= settings.MAX_DRAWDOWN_PCT:
+                    reason = "Max drawdown: {:.1f}%".format(drawdown * 100)
+                    self.pause(reason)
+                    return False, reason
 
-    async def get_open_positions(self) -> Dict[str, Dict]:
-        async with self._lock:
-            return dict(self._positions)
+            # Base risk check
+            ok, reason = await self.base.pre_trade_check(token, amount_usd)
+            return ok, reason
 
-    async def get_status_summary(self) -> Dict[str, Any]:
-        async with self._lock:
-            self._reset_daily_if_needed()
-            return {
-                "open_positions": len(self._positions),
-                "positions": dict(self._positions),
-                "daily_loss_usd": self._daily_loss_usd,
-                "running": self._running,
+    def record_win(self, pnl_usd: float):
+        self.consecutive_losses = 0
+        self.current_balance += pnl_usd
+        if self.current_balance > self.peak_balance:
+            self.peak_balance = self.current_balance
+
+    def record_loss(self, pnl_usd: float):
+        self.consecutive_losses += 1
+        self.current_balance += pnl_usd  # pnl_usd manfiy
+        logger.warning("Ketma-ket zarar: {}ta".format(self.consecutive_losses))
+
+    def record_trade_result(self, pnl_usd: float):
+        if pnl_usd >= 0:
+            self.record_win(pnl_usd)
+        else:
+            self.record_loss(pnl_usd)
+
+    @property
+    def emergency_stop(self) -> bool:
+        return settings.EMERGENCY_STOP
+
+    def set_emergency_stop(self, val: bool):
+        settings.EMERGENCY_STOP = val
+        logger.warning("EMERGENCY_STOP changed to: {}".format(val))
+
+    def status(self) -> Dict[str, Any]:
+        base_status = {}
+        if self.base:
+            base_status = {
+                "open_positions": len(self.base.positions) if hasattr(self.base, "positions") else 0,
+                "daily_loss_usd": self.base.daily_loss_usd if hasattr(self.base, "daily_loss_usd") else 0.0,
             }
+        return {
+            **base_status,
+            "daily_trades": self.daily_trades,
+            "consecutive_losses": self.consecutive_losses,
+            "peak_balance": round(self.peak_balance, 2),
+            "current_balance": round(self.current_balance, 2),
+            "drawdown_pct": round(
+                (self.peak_balance - self.current_balance) / self.peak_balance * 100, 2
+            ) if self.peak_balance > 0 else 0,
+            "emergency_stop": settings.EMERGENCY_STOP,
+            "paused": self._paused,
+            "pause_reason": self._pause_reason,
+            "max_daily_trades": getattr(settings, "MAX_DAILY_TRADES", None),
+        }
 
-    async def set_bot_running(self, running: bool):
-        self._running = running
+    async def get_risk_summary(self) -> Dict[str, Any]:
+        base_status = await self.base.get_status_summary()
+        return {
+            **base_status,
+            "daily_trades": self.daily_trades,
+            "consecutive_losses": self.consecutive_losses,
+            "peak_balance": round(self.peak_balance, 2),
+            "current_balance": round(self.current_balance, 2),
+            "drawdown_pct": round(
+                (self.peak_balance - self.current_balance) / self.peak_balance * 100, 2
+            ) if self.peak_balance > 0 else 0,
+            "emergency_stop": settings.EMERGENCY_STOP,
+            "paused": self._paused,
+            "pause_reason": self._pause_reason,
+            "max_daily_trades": getattr(settings, "MAX_DAILY_TRADES", None),
+        }
 
-    async def reset_daily_loss(self):
-        async with self._lock:
-            self._daily_loss_usd = 0.0
-
-    def clear_cooldowns(self):
-        self._cooldowns.clear()
-
-    def clear_processed(self):
-        self._processed.clear()
