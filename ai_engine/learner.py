@@ -1,96 +1,118 @@
-"""Trade outcome learner – updates AI weights from closed trades (simple online learning)."""
+"""
+Trade Learner — savdo natijalaridan o'rganish.
+AI og'irliklarini muvaffaqiyatli/muvaffaqiyatsiz savdolarga qarab moslashtiradi.
+"""
 from __future__ import annotations
-
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 from utils.logger import logger
-from utils.helpers import utc_now, safe_float
 from config.settings import settings
 
-WEIGHTS_PATH = Path("data/ai_weights.json")
-TRADES_PATH = Path("data/ai_trade_history.jsonl")
+WEIGHTS_FILE = Path("data/ai_weights.json")
+
+DEFAULT_WEIGHTS = {
+    "liquidity": 0.20,
+    "volume":    0.18,
+    "momentum":  0.15,
+    "holders":   0.15,
+    "security":  0.15,
+    "age":       0.08,
+    "buy_sell":  0.09,
+}
 
 
 class TradeLearner:
-    """
-    Stores closed trade features + PnL and adjusts scorer weights.
-    Production: replace with proper model retrain (e.g. sklearn / lightgbm).
-    """
-
     def __init__(self):
-        WEIGHTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        self.weights: Dict[str, float] = self._load_weights()
+        self.weights: Dict[str, float] = dict(DEFAULT_WEIGHTS)
+        self._history: List[Dict] = []
+        self._load()
 
-    def _load_weights(self) -> Dict[str, float]:
-        if WEIGHTS_PATH.exists():
+    def _load(self):
+        if WEIGHTS_FILE.exists():
             try:
-                return json.loads(WEIGHTS_PATH.read_text(encoding="utf-8"))
+                data = json.loads(WEIGHTS_FILE.read_text(encoding="utf-8"))
+                self.weights = data.get("weights", DEFAULT_WEIGHTS)
+                self._history = data.get("history", [])
+                logger.info("AI og'irliklari yuklandi: {}".format(
+                    {k: round(v, 3) for k, v in self.weights.items()}
+                ))
             except Exception as e:
-                logger.warning(f"AI weights load failed: {e}")
-        return {
-            "liquidity": settings.AI_WEIGHT_LIQUIDITY,
-            "volume": settings.AI_WEIGHT_VOLUME,
-            "holders": settings.AI_WEIGHT_HOLDERS,
-            "whale": settings.AI_WEIGHT_WHALE,
-            "smart_money": settings.AI_WEIGHT_SMART_MONEY,
-            "momentum": settings.AI_WEIGHT_MOMENTUM,
-            "security": settings.AI_WEIGHT_SECURITY,
-            "social": settings.AI_WEIGHT_SOCIAL,
-            "age": settings.AI_WEIGHT_AGE,
-            "similar": settings.AI_WEIGHT_SIMILAR,
-        }
+                logger.warning("AI og'irlik yuklash xato: {}".format(e))
 
-    def _save_weights(self):
+    def _save(self):
         try:
-            WEIGHTS_PATH.write_text(json.dumps(self.weights, indent=2), encoding="utf-8")
+            WEIGHTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            WEIGHTS_FILE.write_text(
+                json.dumps({"weights": self.weights, "history": self._history[-200:]},
+                           indent=2),
+                encoding="utf-8"
+            )
         except Exception as e:
-            logger.error(f"AI weights save failed: {e}")
+            logger.warning("AI og'irlik saqlash xato: {}".format(e))
 
     def record_trade(
         self,
+        symbol: str,
         token: str,
-        factors: Dict[str, float],
-        score: float,
-        pnl_usd: float,
         pnl_pct: float,
+        score_breakdown: Dict[str, float],
         reason: str,
     ):
-        """Append trade outcome for learning."""
-        record = {
-            "ts": utc_now().isoformat(),
-            "token": token,
-            "factors": factors,
-            "score": score,
-            "pnl_usd": pnl_usd,
-            "pnl_pct": pnl_pct,
-            "reason": reason,
-        }
-        try:
-            with TRADES_PATH.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(record, default=str) + "\n")
-        except Exception as e:
-            logger.error(f"Trade history write failed: {e}")
-
-        self._update_weights(factors, pnl_pct)
-
-    def _update_weights(self, factors: Dict[str, float], pnl_pct: float):
-        """Very simple online update: boost factors present on wins, dampen on losses."""
-        lr = settings.AI_LEARNING_RATE
-        if abs(pnl_pct) < 1.0:
+        """Savdo natijasini qayd etish va og'irliklarni yangilash."""
+        if not score_breakdown:
             return
-        direction = 1.0 if pnl_pct > 0 else -1.0
-        for k, v in factors.items():
-            if k not in self.weights:
+
+        win = pnl_pct > 0
+        magnitude = min(abs(pnl_pct) / 100, 1.0)   # 0–1 oralig'ida
+        lr = settings.AI_LEARNING_RATE * magnitude
+
+        for factor, score_val in score_breakdown.items():
+            if factor not in self.weights:
                 continue
-            # move weight slightly toward successful factor magnitude
-            delta = lr * direction * (v - 0.5)
-            self.weights[k] = max(0.01, min(0.4, self.weights[k] + delta))
-        # renormalize
-        total = sum(self.weights.values()) or 1.0
-        self.weights = {k: v / total for k, v in self.weights.items()}
-        self._save_weights()
-        logger.info(f"AI weights updated after trade (PnL {pnl_pct:+.1f}%)")
+            if win:
+                # Yuqori score bergan faktorni ko'tarish
+                self.weights[factor] += lr * (score_val / 20.0)
+            else:
+                # Past score bergan faktorni tushirish
+                self.weights[factor] -= lr * (1 - score_val / 20.0)
+
+        # Normalizatsiya: yig'indi = 1.0
+        total = sum(self.weights.values())
+        if total > 0:
+            self.weights = {k: max(0.01, v / total) for k, v in self.weights.items()}
+
+        # Qayd
+        self._history.append({
+            "symbol": symbol,
+            "token": token[:8],
+            "pnl_pct": round(pnl_pct, 2),
+            "win": win,
+            "reason": reason,
+            "weights_after": {k: round(v, 4) for k, v in self.weights.items()},
+        })
+
+        self._save()
+        logger.info("[LEARNER] {} {} pnl={:+.1f}% og'irliklar yangilandi".format(
+            "WIN" if win else "LOSS", symbol, pnl_pct
+        ))
 
     def get_weights(self) -> Dict[str, float]:
         return dict(self.weights)
+
+    def reset_weights(self):
+        self.weights = dict(DEFAULT_WEIGHTS)
+        self._save()
+        logger.info("AI og'irliklari default ga qaytarildi")
+
+    def get_performance_summary(self) -> Dict[str, Any]:
+        if not self._history:
+            return {"total": 0, "wins": 0, "losses": 0, "win_rate": 0}
+        wins = [h for h in self._history if h.get("win")]
+        return {
+            "total": len(self._history),
+            "wins": len(wins),
+            "losses": len(self._history) - len(wins),
+            "win_rate": round(len(wins) / len(self._history) * 100, 1),
+            "weights": self.weights,
+        }

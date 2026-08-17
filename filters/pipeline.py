@@ -1,139 +1,109 @@
-"""Barcha filterlarni ketma-ket ishga tushirish + AI / Blacklist integratsiyasi."""
+"""Filter pipeline — tokenni bosqichma-bosqich tekshirish."""
 from __future__ import annotations
-
-from typing import Dict, Any, List, Tuple, Callable, Optional
+from typing import Any, Dict, Optional, Tuple
+import aiohttp
 from utils.logger import logger
-
-from filters.liquidity import check_liquidity
-from filters.volume import (
-    check_volume_24h,
-    check_volume_5m,
-    check_buy_sell_ratio,
-    check_volume_spike,
-)
-from filters.holders import check_holder_count, check_top10_holders, check_dev_wallet
-from filters.security import (
-    check_mint_authority,
-    check_freeze_authority,
-    check_honeypot,
-    check_market_cap,
-    check_lp_locked,
-)
-from filters.age import check_token_age
-from config.settings import settings
+from utils.helpers import safe_float, safe_int
 from utils.history import history
+from config.settings import settings
+from scanner.birdeye import get_token_security, get_token_overview
+from blacklist.manager import BlacklistManager
 
 
 class FilterPipeline:
-    def __init__(
-        self,
-        blacklist=None,
-        ai_scorer=None,
-        smart_money=None,
-        whale_monitor=None,
-        social=None,
-    ):
+    def __init__(self, blacklist: BlacklistManager):
         self.blacklist = blacklist
-        self.ai_scorer = ai_scorer
-        self.smart_money = smart_money
-        self.whale_monitor = whale_monitor
-        self.social = social
 
-        # Tartib: arzon → qimmat; jadvaldagi barcha mezonlar
-        self.filters: List[Callable[[Dict[str, Any]], Tuple[bool, str]]] = [
-            check_token_age,          # 1–15 daqiqa
-            check_liquidity,          # $20K+
-            check_volume_5m,          # 5m volume $20K+
-            check_buy_sell_ratio,     # Buy/Sell ≥ 2:1
-            check_volume_24h,         # ixtiyoriy (default off)
-            check_market_cap,         # $50K–500K
-            check_holder_count,       # 100+
-            check_top10_holders,      # < 30%
-            check_dev_wallet,
-            check_mint_authority,     # disabled
-            check_freeze_authority,   # disabled
-            check_honeypot,           # yo'q
-            check_lp_locked,          # locked/burned
-            check_volume_spike,
-        ]
-
-    async def run(self, data: Dict[str, Any]) -> Tuple[bool, List[str]]:
+    async def run(self, token_data: Dict, session: aiohttp.ClientSession) -> Tuple[bool, str, Dict]:
         """
-        Barcha filterlardan o'tkazadi + blacklist + AI score.
-        Returns: (passed: bool, reasons: list[str])
+        Returns: (passed, reason, enriched_data)
         """
-        reasons: List[str] = []
-        token = data.get("token_address") or data.get("address") or ""
+        token = token_data.get("token", "")
+        symbol = token_data.get("symbol", "?")
+        data = dict(token_data)
 
-        # 0) Blacklist
-        symbol = data.get("token_symbol") or data.get("symbol") or token[:8]
+        # 1. Blacklist
+        if self.blacklist.is_blacklisted(token):
+            self._reject(symbol, token, "blacklist", "Qora ro'yxatda")
+            return False, "Qora ro'yxatda", data
 
-        if self.blacklist:
-            if self.blacklist.is_blacklisted(token):
-                entry = self.blacklist.get_entry(token) or {}
-                reasons = [f"Blacklisted: {entry.get('reason', 'unknown')}"]
-                history.add_rejection(token, symbol, reasons, stage="blacklist")
-                return False, reasons
-            auto_reason = self.blacklist.auto_check(data)
-            if auto_reason:
-                reasons = [f"Auto-blacklist: {auto_reason}"]
-                history.add_rejection(token, symbol, reasons, stage="blacklist")
-                return False, reasons
+        # 2. Token yoshi
+        age = safe_float(data.get("token_age_minutes"))
+        if age < settings.MIN_TOKEN_AGE_MINUTES:
+            self._reject(symbol, token, "age", f"Juda yangi: {age:.1f} min")
+            return False, f"Juda yangi: {age:.1f} min", data
+        if settings.MAX_TOKEN_AGE_MINUTES > 0 and age > settings.MAX_TOKEN_AGE_MINUTES:
+            self._reject(symbol, token, "age", f"Juda eski: {age:.1f} min")
+            return False, f"Juda eski: {age:.1f} min", data
 
-        # 1) Classic filters
-        for filt in self.filters:
-            try:
-                ok, msg = filt(data)
-                reasons.append(msg)
-                if not ok:
-                    history.add_rejection(token, symbol, reasons, stage=filt.__name__)
-                    return False, reasons
-            except Exception as e:
-                logger.error(f"Filter {filt.__name__} xato: {e}")
-                reasons.append(f"{filt.__name__} exception: {e}")
-                return False, reasons
+        # 3. Likvidlik
+        liq = safe_float(data.get("liquidity_usd"))
+        if liq < settings.MIN_LIQUIDITY_USD:
+            self._reject(symbol, token, "liquidity", f"Kam likvidlik: ${liq:,.0f}")
+            return False, f"Kam likvidlik: ${liq:,.0f}", data
 
-        # 2) Enrich with Smart Money / Whale / Social scores for AI
-        if self.smart_money and token:
-            data["smart_money_score"] = self.smart_money.get_smart_money_score(token)
-        if self.whale_monitor and token:
-            data["whale_activity_score"] = self.whale_monitor.get_activity_score(token)
-        if self.social and token:
-            try:
-                data["social_score"] = await self.social.get_social_score(token, symbol)
-            except Exception as e:
-                logger.debug(f"Social Intelligence enrichment xato (o'tkazib yuborildi): {e}")
+        # 4. Bozor hajmi
+        mc = safe_float(data.get("market_cap"))
+        if mc > 0 and settings.MIN_MARKET_CAP_USD > 0 and mc < settings.MIN_MARKET_CAP_USD:
+            self._reject(symbol, token, "mcap", f"Kam market cap: ${mc:,.0f}")
+            return False, f"Kam market cap: ${mc:,.0f}", data
+        if mc > 0 and settings.MAX_MARKET_CAP_USD > 0 and mc > settings.MAX_MARKET_CAP_USD:
+            self._reject(symbol, token, "mcap", f"Katta market cap: ${mc:,.0f}")
+            return False, f"Katta market cap: ${mc:,.0f}", data
 
-        # 3) AI Score
-        if self.ai_scorer and settings.AI_ENABLED:
-            try:
-                result = self.ai_scorer.score(data)
-                data["ai_score"] = result.score
-                data["ai_recommendation"] = result.recommendation.value
-                data["ai_factors"] = result.factors
-                reasons.append(f"AI Score: {result.score:.1f} ({result.recommendation.value})")
+        # 5. Hajm
+        vol5m = safe_float(data.get("volume_5m"))
+        if vol5m < settings.MIN_VOLUME_5M_USD:
+            self._reject(symbol, token, "volume", f"Kam hajm 5m: ${vol5m:,.0f}")
+            return False, f"Kam hajm 5m: ${vol5m:,.0f}", data
 
-                if self.smart_money:
-                    boost = self.smart_money.score_boost(token)
-                    if boost:
-                        result.score = min(100.0, result.score + boost)
-                        data["ai_score"] = result.score
-                        reasons.append(f"Smart money boost +{boost:.0f}")
+        # 6. Xarid/Sotuv nisbati
+        bsr = safe_float(data.get("buy_sell_ratio"), 1.0)
+        if bsr < settings.MIN_BUY_SELL_RATIO:
+            self._reject(symbol, token, "bsr", f"Nisbat past: {bsr:.1f}")
+            return False, f"Xarid/Sotuv nisbati past: {bsr:.1f}", data
 
-                if self.whale_monitor:
-                    delta = self.whale_monitor.score_delta(token)
-                    if delta:
-                        result.score = max(0.0, min(100.0, result.score + delta))
-                        data["ai_score"] = result.score
-                        reasons.append(f"Whale delta {delta:+.0f}")
+        # 7. Birdeye xavfsizlik tekshiruvi
+        if settings.BIRDEYE_API_KEY:
+            sec = await get_token_security(session, token)
+            ov = await get_token_overview(session, token)
+            data["security"] = sec
+            data["birdeye_overview"] = ov
 
-                if not self.ai_scorer.passes_threshold(result):
-                    history.add_rejection(token, symbol, reasons, stage="ai_score")
-                    return False, reasons
-            except Exception as e:
-                logger.error(f"AI scorer xato: {e}")
-                reasons.append(f"AI exception: {e}")
-                if settings.AI_MIN_SCORE > 0:
-                    return False, reasons
+            if sec:
+                # Honeypot
+                if sec.get("is_honeypot") in (True, "true", "1", 1):
+                    if settings.AUTO_BLACKLIST_ENABLED and settings.BLACKLIST_HONEYPOT:
+                        self.blacklist.add(token, "honeypot", source="filter")
+                    self._reject(symbol, token, "security", "Honeypot")
+                    return False, "Honeypot aniqlandi", data
 
-        return True, reasons
+                # Mint / Freeze
+                if sec.get("mint_authority") or sec.get("is_mintable"):
+                    self._reject(symbol, token, "security", "Mint authority faol")
+                    return False, "Mint authority faol", data
+                if sec.get("freeze_authority") or sec.get("is_freezable"):
+                    self._reject(symbol, token, "security", "Freeze authority faol")
+                    return False, "Freeze authority faol", data
+
+                # Holderlar
+                holders = safe_int(sec.get("holder_count") or ov.get("holder"))
+                data["holder_count"] = holders
+                if holders > 0 and holders < settings.MIN_HOLDERS:
+                    self._reject(symbol, token, "holders", f"Kam holderlar: {holders}")
+                    return False, f"Kam holderlar: {holders}", data
+
+                # Top10
+                top10 = safe_float(sec.get("top10_holder_pct") or sec.get("top10_user_pct"))
+                if top10 > 1:
+                    top10 /= 100
+                if top10 > settings.MAX_TOP10_HOLDER_PCT:
+                    self._reject(symbol, token, "holders", f"Top10 yuqori: {top10*100:.0f}%")
+                    return False, f"Top10 holder konsentratsiya: {top10*100:.0f}%", data
+
+        logger.info(f"[FILTER OK] {symbol} ({token[:8]}…) liq=${liq:,.0f} vol5m=${vol5m:,.0f}")
+        return True, "OK", data
+
+    def _reject(self, symbol: str, token: str, stage: str, reason: str):
+        history.add_rejection(symbol, token, stage, reason)
+        logger.debug(f"[REJECT] {symbol} → {stage}: {reason}")

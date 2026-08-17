@@ -1,12 +1,77 @@
 {
-  "liquidity": 0.12408557792326122,
-  "volume": 0.10423188545553944,
-  "holders": 0.07445134675395673,
-  "whale": 0.11912215480633077,
-  "smart_money": 0.14791000888452738,
-  "momentum": 0.0956643080952722,
-  "security": 0.15386611662484392,
-  "social": 0.07941476987088718,
-  "age": 0.051619600416076675,
-  "similar": 0.04963423116930449
+  "weights": {
+    "liquidity": 0.2,
+    "volume": 0.18,
+    "momentum": 0.15,
+    "holders": 0.15,
+    "security": 0.15,
+    "age": 0.08,
+    "buy_sell": 0.09
+  },
+  "history": [
+    {
+      "symbol": "SOL",
+      "token": "So111111",
+      "pnl_pct": 0.0,
+      "win": false,
+      "reason": "stop_loss",
+      "weights_after": {
+        "liquidity": 0.2,
+        "volume": 0.18,
+        "momentum": 0.15,
+        "holders": 0.15,
+        "security": 0.15,
+        "age": 0.08,
+        "buy_sell": 0.09
+      }
+    },
+    {
+      "symbol": "SOL",
+      "token": "So111111",
+      "pnl_pct": 0.0,
+      "win": false,
+      "reason": "stop_loss",
+      "weights_after": {
+        "liquidity": 0.2,
+        "volume": 0.18,
+        "momentum": 0.15,
+        "holders": 0.15,
+        "security": 0.15,
+        "age": 0.08,
+        "buy_sell": 0.09
+      }
+    },
+    {
+      "symbol": "SOL",
+      "token": "So111111",
+      "pnl_pct": 0.0,
+      "win": false,
+      "reason": "stop_loss",
+      "weights_after": {
+        "liquidity": 0.2,
+        "volume": 0.18,
+        "momentum": 0.15,
+        "holders": 0.15,
+        "security": 0.15,
+        "age": 0.08,
+        "buy_sell": 0.09
+      }
+    },
+    {
+      "symbol": "SOL",
+      "token": "So111111",
+      "pnl_pct": 0.0,
+      "win": false,
+      "reason": "stop_loss",
+      "weights_after": {
+        "liquidity": 0.2,
+        "volume": 0.18,
+        "momentum": 0.15,
+        "holders": 0.15,
+        "security": 0.15,
+        "age": 0.08,
+        "buy_sell": 0.09
+      }
+    }
+  ]
 }

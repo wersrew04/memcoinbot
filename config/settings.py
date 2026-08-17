@@ -1,180 +1,197 @@
-"""Central configuration – all parameters controllable via Admin Panel / .env."""
+"""Barcha sozlamalar — .env dan o'qiladi."""
 from __future__ import annotations
+import os
+from pathlib import Path
 
-from pydantic_settings import BaseSettings
-from typing import Optional, List
+def _bool(val: str, default: bool = False) -> bool:
+    if val is None:
+        return default
+    val_str = str(val).strip("'\"").lower()
+    return val_str in ("1", "true", "yes", "on")
 
+def _float(val, default: float = 0.0) -> float:
+    try:
+        if isinstance(val, str):
+            val = val.strip("'\"")
+        return float(val)
+    except (TypeError, ValueError):
+        return default
 
-class Settings(BaseSettings):
-    # ---------- Wallet ----------
-    PRIVATE_KEY: str = ""
-    RPC_URL: str = "https://api.mainnet-beta.solana.com"
+def _int(val, default: int = 0) -> int:
+    try:
+        if isinstance(val, str):
+            val = val.strip("'\"")
+        return int(float(val))
+    except (TypeError, ValueError):
+        return default
 
-    # ---------- APIs ----------
-    BIRDEYE_API_KEY: str = ""
-    JUPITER_API_KEY: Optional[str] = None
-    HELIUS_API_KEY: str = ""
-    OPENAI_API_KEY: Optional[str] = None
-    TELEGRAM_BOT_TOKEN: str = ""
-    TELEGRAM_CHAT_ID: str = ""
-    DISCORD_WEBHOOK_URL: str = ""
-    EMAIL_SMTP_HOST: str = ""
-    EMAIL_SMTP_PORT: int = 587
-    EMAIL_USER: str = ""
-    EMAIL_PASSWORD: str = ""
-    EMAIL_TO: str = ""
+# .env ni yuklash
+env_path = Path(__file__).resolve().parent.parent / ".env"
+if env_path.exists():
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        os.environ.setdefault(k.strip(), v.strip())
 
-    # ---------- Trading ----------
-    TRADE_AMOUNT_USD: float = 10.0
-    MAX_OPEN_POSITIONS: int = 5
-    STOP_LOSS_PCT: float = 0.10
-    TAKE_PROFIT_PCT: float = 0.30
-    TRAILING_STOP_PCT: float = 0.15
-    COOLDOWN_MINUTES: int = 30
-    MAX_DAILY_LOSS_USD: float = 20.0
-    MAX_RISK_PER_TOKEN_USD: float = 10.0
-    MAX_CONSECUTIVE_LOSSES: int = 5
-    MAX_DAILY_TRADES: int = 50
-    MAX_TOKEN_ALLOCATION_PCT: float = 0.25  # portfolio share
-    SLIPPAGE_BPS: int = 300
-    PAPER_TRADING: bool = True
-    PRIORITY_FEE_MICROLAMPORTS: int = 50_000
+g = os.environ.get
 
-    # ---------- Filter thresholds (memecoin sniper profile) ----------
-    # Token yoshi: 1–15 daqiqa
-    MIN_TOKEN_AGE_MINUTES: float = 1.0
-    MAX_TOKEN_AGE_MINUTES: float = 15.0
-    # Liquidity: $20K–100K+
-    MIN_LIQUIDITY_USD: float = 20_000
-    MAX_LIQUIDITY_USD: float = 0  # 0 = yuqori chegara yo'q
-    # Market Cap: $50K–500K
-    MIN_MARKET_CAP_USD: float = 50_000
-    MAX_MARKET_CAP_USD: float = 500_000
-    # Volume
-    MIN_24H_VOLUME_USD: float = 0  # yangi tokenlar uchun 24h majburiy emas
-    MIN_VOLUME_5M_USD: float = 20_000  # 5 daqiqalik volume $20K+
-    MIN_VOLUME_SPIKE_PCT: float = 2.0
-    # Buy/Sell nisbati 2:1 yoki yuqori (5m txns)
-    MIN_BUY_SELL_RATIO: float = 2.0
-    # Holders
-    MIN_HOLDERS: int = 100
-    MAX_TOP10_HOLDER_PCT: float = 0.30  # 30% dan kam
-    MAX_DEV_WALLET_PCT: float = 0.10
-    # LP locked/burned majburiy (ma'lumot bo'lsa)
-    REQUIRE_LP_LOCKED: bool = True
+class Settings:
+    # === Wallet ===
+    PRIVATE_KEY: str = g("PRIVATE_KEY", "")
+    RPC_URL: str = g("RPC_URL", "https://api.mainnet-beta.solana.com")
 
-    # ---------- AI Engine ----------
-    AI_ENABLED: bool = True
-    AI_MIN_SCORE: float = 55.0          # 0-100
-    AI_STRONG_BUY_THRESHOLD: float = 80.0
-    AI_BUY_THRESHOLD: float = 65.0
-    AI_LEARNING_RATE: float = 0.01
-    AI_WEIGHT_LIQUIDITY: float = 0.12
-    AI_WEIGHT_VOLUME: float = 0.10
-    AI_WEIGHT_HOLDERS: float = 0.08
-    AI_WEIGHT_WHALE: float = 0.12
-    AI_WEIGHT_SMART_MONEY: float = 0.15
-    AI_WEIGHT_MOMENTUM: float = 0.10
-    AI_WEIGHT_SECURITY: float = 0.15
-    AI_WEIGHT_SOCIAL: float = 0.08
-    AI_WEIGHT_AGE: float = 0.05
-    AI_WEIGHT_SIMILAR: float = 0.05
+    # === API kalitlari ===
+    BIRDEYE_API_KEY: str = g("BIRDEYE_API_KEY", "")
+    JUPITER_API_KEY: str = g("JUPITER_API_KEY", "")
+    HELIUS_API_KEY: str = g("HELIUS_API_KEY", "")
+    OPENAI_API_KEY: str = g("OPENAI_API_KEY", "")
+    TELEGRAM_BOT_TOKEN: str = g("TELEGRAM_BOT_TOKEN", "")
+    TELEGRAM_CHAT_ID: str = g("TELEGRAM_CHAT_ID", "")
+    DISCORD_WEBHOOK_URL: str = g("DISCORD_WEBHOOK_URL", "")
+    X_API_BEARER_TOKEN: str = g("X_API_BEARER_TOKEN", "")
+    EMAIL_SMTP_HOST: str = g("EMAIL_SMTP_HOST", "")
+    EMAIL_SMTP_PORT: int = _int(g("EMAIL_SMTP_PORT"), 587)
+    EMAIL_USER: str = g("EMAIL_USER", "")
+    EMAIL_PASSWORD: str = g("EMAIL_PASSWORD", "")
+    EMAIL_TO: str = g("EMAIL_TO", "")
 
-    # ---------- Smart Money ----------
-    SMART_MONEY_ENABLED: bool = True
-    SMART_MONEY_MIN_ROI_PCT: float = 200.0
-    SMART_MONEY_MIN_WIN_RATE: float = 0.70
-    SMART_MONEY_MIN_TRADES: int = 100
-    SMART_MONEY_SCORE_BOOST: float = 15.0  # added to AI score when multi-wallet buy
+    # === Savdo ===
+    PAPER_TRADING: bool = _bool(g("PAPER_TRADING"), True)
+    TRADE_AMOUNT_USD: float = _float(g("TRADE_AMOUNT_USD"), 1.0)
+    MAX_OPEN_POSITIONS: int = _int(g("MAX_OPEN_POSITIONS"), 5)
+    STOP_LOSS_PCT: float = _float(g("STOP_LOSS_PCT"), 0.10)
+    TAKE_PROFIT_PCT: float = _float(g("TAKE_PROFIT_PCT"), 0.30)
+    TRAILING_STOP_PCT: float = _float(g("TRAILING_STOP_PCT"), 0.15)
+    COOLDOWN_MINUTES: int = _int(g("COOLDOWN_MINUTES"), 30)
+    MAX_DAILY_LOSS_USD: float = _float(g("MAX_DAILY_LOSS_USD"), 20.0)
+    MAX_RISK_PER_TOKEN_USD: float = _float(g("MAX_RISK_PER_TOKEN_USD"), 10.0)
+    MAX_CONSECUTIVE_LOSSES: int = _int(g("MAX_CONSECUTIVE_LOSSES"), 5)
+    MAX_DAILY_TRADES: int = _int(g("MAX_DAILY_TRADES"), 50)
+    SLIPPAGE_BPS: int = _int(g("SLIPPAGE_BPS"), 300)
+    PRIORITY_FEE_MICROLAMPORTS: int = _int(g("PRIORITY_FEE_MICROLAMPORTS"), 50000)
+    SELL_RETRY_ATTEMPTS: int = _int(g("SELL_RETRY_ATTEMPTS"), 3)
+    PARTIAL_TP_ENABLED: bool = _bool(g("PARTIAL_TP_ENABLED"), False)
+    PARTIAL_TP_PCT: float = _float(g("PARTIAL_TP_PCT"), 0.5)
+    PARTIAL_TP_TRIGGER_PCT: float = _float(g("PARTIAL_TP_TRIGGER_PCT"), 0.30)
 
-    # ---------- Whale Tracking ----------
-    WHALE_TRACKING_ENABLED: bool = True
-    WHALE_THRESHOLDS_USD: str = "100000,250000,500000,1000000"  # comma-separated
-    WHALE_BUY_SCORE_BOOST: float = 10.0
-    WHALE_SELL_SCORE_PENALTY: float = 12.0
+    # === Filtrlar ===
+    MIN_TOKEN_AGE_MINUTES: float = _float(g("MIN_TOKEN_AGE_MINUTES"), 1.0)
+    MAX_TOKEN_AGE_MINUTES: float = _float(g("MAX_TOKEN_AGE_MINUTES"), 15.0)
+    MIN_LIQUIDITY_USD: float = _float(g("MIN_LIQUIDITY_USD"), 20000)
+    MAX_LIQUIDITY_USD: float = _float(g("MAX_LIQUIDITY_USD"), 0)
+    MIN_MARKET_CAP_USD: float = _float(g("MIN_MARKET_CAP_USD"), 50000)
+    MAX_MARKET_CAP_USD: float = _float(g("MAX_MARKET_CAP_USD"), 500000)
+    MIN_24H_VOLUME_USD: float = _float(g("MIN_24H_VOLUME_USD"), 0)
+    MIN_VOLUME_5M_USD: float = _float(g("MIN_VOLUME_5M_USD"), 20000)
+    MIN_VOLUME_SPIKE_PCT: float = _float(g("MIN_VOLUME_SPIKE_PCT"), 2.0)
+    MIN_BUY_SELL_RATIO: float = _float(g("MIN_BUY_SELL_RATIO"), 2.0)
+    MIN_HOLDERS: int = _int(g("MIN_HOLDERS"), 100)
+    MAX_TOP10_HOLDER_PCT: float = _float(g("MAX_TOP10_HOLDER_PCT"), 0.30)
+    MAX_DEV_WALLET_PCT: float = _float(g("MAX_DEV_WALLET_PCT"), 0.10)
+    REQUIRE_LP_LOCKED: bool = _bool(g("REQUIRE_LP_LOCKED"), True)
 
-    # ---------- Social Intelligence (X.com official API only) ----------
-    SOCIAL_INTELLIGENCE_ENABLED: bool = False  # X_API_BEARER_TOKEN o'rnatilmaguncha default OFF
-    X_API_BEARER_TOKEN: Optional[str] = None
-    SOCIAL_API_TIMEOUT_SEC: float = 5.0
-    SOCIAL_CACHE_TTL_MIN: float = 30.0  # bir xil token uchun qayta so'rov yubormaslik
-    SOCIAL_MAX_CALLS_PER_DAY: int = 150  # X API kvotangizga mos sozlang
-    SOCIAL_MIN_MENTIONS_FOR_SIGNAL: int = 3
-    SOCIAL_INFLUENCER_FOLLOWER_THRESHOLD: int = 20000
+    # === AI ===
+    AI_ENABLED: bool = _bool(g("AI_ENABLED"), True)
+    AI_MIN_SCORE: float = _float(g("AI_MIN_SCORE"), 55.0)
+    AI_STRONG_BUY_THRESHOLD: float = _float(g("AI_STRONG_BUY_THRESHOLD"), 80.0)
+    AI_BUY_THRESHOLD: float = _float(g("AI_BUY_THRESHOLD"), 65.0)
+    AI_LEARNING_RATE: float = _float(g("AI_LEARNING_RATE"), 0.01)
+    AI_WEIGHT_LIQUIDITY: float = _float(g("AI_WEIGHT_LIQUIDITY"), 0.12)
+    AI_WEIGHT_VOLUME: float = _float(g("AI_WEIGHT_VOLUME"), 0.10)
+    AI_WEIGHT_HOLDERS: float = _float(g("AI_WEIGHT_HOLDERS"), 0.08)
+    AI_WEIGHT_WHALE: float = _float(g("AI_WEIGHT_WHALE"), 0.12)
+    AI_WEIGHT_SMART_MONEY: float = _float(g("AI_WEIGHT_SMART_MONEY"), 0.15)
+    AI_WEIGHT_MOMENTUM: float = _float(g("AI_WEIGHT_MOMENTUM"), 0.10)
+    AI_WEIGHT_SECURITY: float = _float(g("AI_WEIGHT_SECURITY"), 0.15)
+    AI_WEIGHT_SOCIAL: float = _float(g("AI_WEIGHT_SOCIAL"), 0.08)
+    AI_WEIGHT_AGE: float = _float(g("AI_WEIGHT_AGE"), 0.05)
+    AI_WEIGHT_SIMILAR: float = _float(g("AI_WEIGHT_SIMILAR"), 0.05)
 
-    # ---------- MEV Protection ----------
-    MEV_PROTECTION_ENABLED: bool = True
-    MEV_MAX_SLIPPAGE_BPS: int = 500
-    MEV_SANDWICH_RISK_THRESHOLD: float = 0.7
-    MEV_DYNAMIC_SLIPPAGE: bool = True
-    MEV_RETRY_ATTEMPTS: int = 3
+    # === Smart Money ===
+    SMART_MONEY_ENABLED: bool = _bool(g("SMART_MONEY_ENABLED"), True)
+    SMART_MONEY_MIN_ROI_PCT: float = _float(g("SMART_MONEY_MIN_ROI_PCT"), 200.0)
+    SMART_MONEY_MIN_WIN_RATE: float = _float(g("SMART_MONEY_MIN_WIN_RATE"), 0.70)
+    SMART_MONEY_MIN_TRADES: int = _int(g("SMART_MONEY_MIN_TRADES"), 100)
+    SMART_MONEY_SCORE_BOOST: float = _float(g("SMART_MONEY_SCORE_BOOST"), 15.0)
 
-    # ---------- Blacklist ----------
-    AUTO_BLACKLIST_ENABLED: bool = True
-    BLACKLIST_HONEYPOT: bool = True
-    BLACKLIST_RUG_PULL: bool = True
-    BLACKLIST_FAKE_VOLUME: bool = True
-    BLACKLIST_MALICIOUS: bool = True
+    # === Whale ===
+    WHALE_TRACKING_ENABLED: bool = _bool(g("WHALE_TRACKING_ENABLED"), True)
+    WHALE_THRESHOLDS_USD: str = g("WHALE_THRESHOLDS_USD", "100000,250000,500000,1000000")
+    WHALE_BUY_SCORE_BOOST: float = _float(g("WHALE_BUY_SCORE_BOOST"), 10.0)
+    WHALE_SELL_SCORE_PENALTY: float = _float(g("WHALE_SELL_SCORE_PENALTY"), 12.0)
 
-    # ---------- Advanced Risk ----------
-    EMERGENCY_STOP: bool = False
-    AUTO_PAUSE_ON_ERROR: bool = True
-    MAX_DRAWDOWN_PCT: float = 0.25
+    # === Social ===
+    SOCIAL_INTELLIGENCE_ENABLED: bool = _bool(g("SOCIAL_INTELLIGENCE_ENABLED"), False)
+    SOCIAL_API_TIMEOUT_SEC: float = _float(g("SOCIAL_API_TIMEOUT_SEC"), 5.0)
+    SOCIAL_CACHE_TTL_MIN: float = _float(g("SOCIAL_CACHE_TTL_MIN"), 30.0)
+    SOCIAL_MAX_CALLS_PER_DAY: int = _int(g("SOCIAL_MAX_CALLS_PER_DAY"), 150)
+    SOCIAL_MIN_MENTIONS_FOR_SIGNAL: int = _int(g("SOCIAL_MIN_MENTIONS_FOR_SIGNAL"), 3)
+    SOCIAL_INFLUENCER_FOLLOWER_THRESHOLD: int = _int(g("SOCIAL_INFLUENCER_FOLLOWER_THRESHOLD"), 20000)
 
-    # ---------- Portfolio ----------
-    PORTFOLIO_MAX_SECTOR_PCT: float = 0.40
-    PORTFOLIO_DIVERSIFICATION_MIN: int = 3
+    # === MEV ===
+    MEV_PROTECTION_ENABLED: bool = _bool(g("MEV_PROTECTION_ENABLED"), True)
+    MEV_MAX_SLIPPAGE_BPS: int = _int(g("MEV_MAX_SLIPPAGE_BPS"), 500)
+    MEV_SANDWICH_RISK_THRESHOLD: float = _float(g("MEV_SANDWICH_RISK_THRESHOLD"), 0.7)
+    MEV_DYNAMIC_SLIPPAGE: bool = _bool(g("MEV_DYNAMIC_SLIPPAGE"), True)
+    MEV_RETRY_ATTEMPTS: int = _int(g("MEV_RETRY_ATTEMPTS"), 3)
 
-    # ---------- Notifications ----------
-    NOTIFY_TELEGRAM: bool = True
-    NOTIFY_DISCORD: bool = False
-    NOTIFY_EMAIL: bool = False
-    NOTIFY_ON_BUY: bool = True
-    NOTIFY_ON_SELL: bool = True
-    NOTIFY_ON_AI_SIGNAL: bool = True
-    NOTIFY_ON_WHALE: bool = True
-    NOTIFY_ON_ERROR: bool = True
+    # === Blacklist ===
+    AUTO_BLACKLIST_ENABLED: bool = _bool(g("AUTO_BLACKLIST_ENABLED"), True)
+    BLACKLIST_HONEYPOT: bool = _bool(g("BLACKLIST_HONEYPOT"), True)
+    BLACKLIST_RUG_PULL: bool = _bool(g("BLACKLIST_RUG_PULL"), True)
+    BLACKLIST_FAKE_VOLUME: bool = _bool(g("BLACKLIST_FAKE_VOLUME"), True)
+    BLACKLIST_MALICIOUS: bool = _bool(g("BLACKLIST_MALICIOUS"), True)
 
-    # ---------- Monitoring ----------
-    RPC_HEALTH_CHECK_INTERVAL_SEC: int = 60
-    API_LATENCY_THRESHOLD_MS: int = 2000
-    AUTO_RECOVERY_ENABLED: bool = True
+    # === Advanced Risk ===
+    EMERGENCY_STOP: bool = _bool(g("EMERGENCY_STOP"), False)
+    AUTO_PAUSE_ON_ERROR: bool = _bool(g("AUTO_PAUSE_ON_ERROR"), True)
+    MAX_DRAWDOWN_PCT: float = _float(g("MAX_DRAWDOWN_PCT"), 0.25)
 
-    # ---------- Backtest ----------
-    BACKTEST_DEFAULT_DAYS: int = 30
+    # === Portfolio ===
+    PORTFOLIO_MAX_SECTOR_PCT: float = _float(g("PORTFOLIO_MAX_SECTOR_PCT"), 0.40)
+    PORTFOLIO_DIVERSIFICATION_MIN: int = _int(g("PORTFOLIO_DIVERSIFICATION_MIN"), 3)
+    MAX_TOKEN_ALLOCATION_PCT: float = _float(g("MAX_TOKEN_ALLOCATION_PCT"), 0.25)
+    POSITION_RISK_PCT: float = _float(g("POSITION_RISK_PCT"), 0.02)
 
-    # ---------- Monitor interval ----------
-    POSITION_MONITOR_INTERVAL_SEC: int = 15
-    SCANNER_INTERVAL_SEC: int = 60
-    SELL_RETRY_ATTEMPTS: int = 3
-    PARTIAL_TP_ENABLED: bool = False
-    PARTIAL_TP_PCT: float = 0.5  # 50% of position
-    PARTIAL_TP_TRIGGER_PCT: float = 0.30  # at +30%
+    # === Notifications ===
+    NOTIFY_TELEGRAM: bool = _bool(g("NOTIFY_TELEGRAM"), True)
+    NOTIFY_DISCORD: bool = _bool(g("NOTIFY_DISCORD"), False)
+    NOTIFY_EMAIL: bool = _bool(g("NOTIFY_EMAIL"), False)
+    NOTIFY_ON_BUY: bool = _bool(g("NOTIFY_ON_BUY"), True)
+    NOTIFY_ON_SELL: bool = _bool(g("NOTIFY_ON_SELL"), True)
+    NOTIFY_ON_AI_SIGNAL: bool = _bool(g("NOTIFY_ON_AI_SIGNAL"), True)
+    NOTIFY_ON_WHALE: bool = _bool(g("NOTIFY_ON_WHALE"), True)
+    NOTIFY_ON_ERROR: bool = _bool(g("NOTIFY_ON_ERROR"), True)
 
-    # ---------- Database & Redis ----------
-    DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/memebot"
-    REDIS_URL: str = "redis://localhost:6379/0"
+    # === Monitoring ===
+    POSITION_MONITOR_INTERVAL_SEC: int = _int(g("POSITION_MONITOR_INTERVAL_SEC"), 15)
+    SCANNER_INTERVAL_SEC: int = _int(g("SCANNER_INTERVAL_SEC"), 60)
+    RPC_HEALTH_CHECK_INTERVAL_SEC: int = _int(g("RPC_HEALTH_CHECK_INTERVAL_SEC"), 60)
+    API_LATENCY_THRESHOLD_MS: int = _int(g("API_LATENCY_THRESHOLD_MS"), 2000)
+    AUTO_RECOVERY_ENABLED: bool = _bool(g("AUTO_RECOVERY_ENABLED"), True)
 
-    # ---------- Admin / API ----------
-    ADMIN_API_HOST: str = "0.0.0.0"
-    ADMIN_API_PORT: int = 8080  # overridden by $PORT in main.py for Railway/Heroku/Render
-    ADMIN_API_KEY: str = "change-me-in-production"
+    # === Backtest ===
+    BACKTEST_DEFAULT_DAYS: int = _int(g("BACKTEST_DEFAULT_DAYS"), 30)
 
-    # ---------- Admin Panel (web login) ----------
-    ADMIN_USERNAME: str = "admin"
-    ADMIN_PASSWORD: str = "admin123"
-    ADMIN_SESSION_SECRET: str = "change-this-session-secret-in-production"
+    # === DB & Redis ===
+    DATABASE_URL: str = g("DATABASE_URL", "sqlite+aiosqlite:///./data/memebot.db")
+    REDIS_URL: str = g("REDIS_URL", "redis://localhost:6379/0")
 
-    # ---------- Bot control ----------
-    BOT_RUNNING: bool = True
+    # === Admin ===
+    ADMIN_API_HOST: str = g("ADMIN_API_HOST", "0.0.0.0")
+    ADMIN_API_PORT: int = _int(g("ADMIN_API_PORT"), 8080)
+    ADMIN_API_KEY: str = g("ADMIN_API_KEY", "change-me-in-production")
+    ADMIN_USERNAME: str = g("ADMIN_USERNAME", "admin")
+    ADMIN_PASSWORD: str = g("ADMIN_PASSWORD", "admin123")
+    ADMIN_SESSION_SECRET: str = g("ADMIN_SESSION_SECRET", "change-this-session-secret")
 
-    model_config = {
-        "env_file": ".env",
-        "extra": "ignore",
-    }
+    # === Runtime (koddan o'zgartiriladi) ===
+    BOT_RUNNING: bool = False
 
-    def whale_thresholds_list(self) -> List[float]:
-        return [float(x.strip()) for x in self.WHALE_THRESHOLDS_USD.split(",") if x.strip()]
-
+    def model_dump(self):
+        return {k: getattr(self, k) for k in dir(self)
+                if not k.startswith("_") and not callable(getattr(self, k))}
 
 settings = Settings()

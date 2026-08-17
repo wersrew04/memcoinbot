@@ -1,86 +1,116 @@
-"""Advanced Risk Manager – consecutive losses, daily trades, emergency stop, auto-pause."""
+"""
+Advanced Risk Manager — kengaytirilgan risk boshqaruvi.
+Kunlik savdolar, consecutive losses, drawdown, emergency stop.
+"""
 from __future__ import annotations
-
-from typing import Any, Dict, Optional, Tuple
+import asyncio
+from typing import Any, Dict, Tuple
 from utils.logger import logger
 from utils.helpers import utc_now, safe_float
 from config.settings import settings
-from risk.manager import RiskManager
 
 
 class AdvancedRiskManager:
-    """
-    Wraps / extends existing RiskManager with extra controls.
-    Does not replace the original – composes it.
-    """
-
-    def __init__(self, base: RiskManager):
-        self.base = base
-        self.consecutive_losses: int = 0
+    def __init__(self, base_risk_manager):
+        self.base = base_risk_manager
         self.daily_trades: int = 0
-        self._daily_trades_date: str = utc_now().date().isoformat()
-        self.emergency_stop: bool = settings.EMERGENCY_STOP
-        self.paused: bool = False
-        self.pause_reason: str = ""
+        self.consecutive_losses: int = 0
+        self.peak_balance: float = 0.0
+        self.current_balance: float = 0.0
+        self._daily_date: str = utc_now().date().isoformat()
+        self._lock = asyncio.Lock()
 
     def _reset_daily_if_needed(self):
         today = utc_now().date().isoformat()
-        if self._daily_trades_date != today:
+        if self._daily_date != today:
             self.daily_trades = 0
-            self._daily_trades_date = today
+            self._daily_date = today
+            logger.info("Kunlik hisoblagichlar yangilandi")
 
     async def pre_trade_check(self, token: str, amount_usd: float) -> Tuple[bool, str]:
-        if self.emergency_stop or settings.EMERGENCY_STOP:
-            return False, "Favqulodda to'xtatish faol"
+        async with self._lock:
+            self._reset_daily_if_needed()
 
-        if self.paused:
-            return False, f"Bot to'xtatilgan: {self.pause_reason}"
+            # Emergency stop
+            if settings.EMERGENCY_STOP:
+                return False, "Emergency stop faol"
 
-        # base checks
-        ok, reason = await self.base.pre_trade_check(token, amount_usd)
-        if not ok:
-            return False, reason
+            # Bot ishlamayotgan bo'lsa
+            if not settings.BOT_RUNNING:
+                return False, "Bot to'xtatilgan"
 
-        self._reset_daily_if_needed()
-        if self.daily_trades >= settings.MAX_DAILY_TRADES:
-            return False, f"Kunlik savdo limiti tugadi ({settings.MAX_DAILY_TRADES})"
+            # Kunlik savdolar limiti
+            if self.daily_trades >= settings.MAX_DAILY_TRADES:
+                return False, "Kunlik savdolar limiti: {}".format(settings.MAX_DAILY_TRADES)
 
-        if self.consecutive_losses >= settings.MAX_CONSECUTIVE_LOSSES:
-            self.pause(f"Ketma-ket zararlar: {self.consecutive_losses}")
-            return False, "Ketma-ket zararlar limiti – avtomatik to'xtatildi"
+            # Consecutive losses
+            if self.consecutive_losses >= settings.MAX_CONSECUTIVE_LOSSES:
+                return False, "Ketma-ket {}ta zarar — to'xtatildi".format(self.consecutive_losses)
 
-        return True, "OK"
+            # Max drawdown
+            if self.peak_balance > 0 and self.current_balance > 0:
+                drawdown = (self.peak_balance - self.current_balance) / self.peak_balance
+                if drawdown >= settings.MAX_DRAWDOWN_PCT:
+                    return False, "Max drawdown: {:.1f}%".format(drawdown * 100)
+
+            # Base risk check
+            ok, reason = await self.base.pre_trade_check(token, amount_usd)
+            return ok, reason
+
+    def record_win(self, pnl_usd: float):
+        self.consecutive_losses = 0
+        self.current_balance += pnl_usd
+        if self.current_balance > self.peak_balance:
+            self.peak_balance = self.current_balance
+
+    def record_loss(self, pnl_usd: float):
+        self.consecutive_losses += 1
+        self.current_balance += pnl_usd  # pnl_usd manfiy
+        logger.warning("Ketma-ket zarar: {}ta".format(self.consecutive_losses))
 
     def record_trade_result(self, pnl_usd: float):
-        """Sotishdan keyin: consecutive losses. daily_trades buy da oshadi."""
-        self._reset_daily_if_needed()
-        if pnl_usd < 0:
-            self.consecutive_losses += 1
+        if pnl_usd >= 0:
+            self.record_win(pnl_usd)
         else:
-            self.consecutive_losses = 0
+            self.record_loss(pnl_usd)
 
-    def pause(self, reason: str):
-        self.paused = True
-        self.pause_reason = reason
-        logger.warning(f"AdvancedRisk PAUSE: {reason}")
+    @property
+    def emergency_stop(self) -> bool:
+        return settings.EMERGENCY_STOP
 
-    def resume(self):
-        self.paused = False
-        self.pause_reason = ""
-        self.consecutive_losses = 0
-        logger.info("AdvancedRisk RESUME")
-
-    def set_emergency_stop(self, active: bool):
-        self.emergency_stop = active
-        logger.warning(f"Emergency stop = {active}")
+    def set_emergency_stop(self, val: bool):
+        settings.EMERGENCY_STOP = val
+        logger.warning("EMERGENCY_STOP changed to: {}".format(val))
 
     def status(self) -> Dict[str, Any]:
+        base_status = {}
+        if self.base:
+            base_status = {
+                "open_positions": len(self.base.positions) if hasattr(self.base, "positions") else 0,
+                "daily_loss_usd": self.base.daily_loss_usd if hasattr(self.base, "daily_loss_usd") else 0.0,
+            }
         return {
-            "emergency_stop": self.emergency_stop or settings.EMERGENCY_STOP,
-            "paused": self.paused,
-            "pause_reason": self.pause_reason,
-            "consecutive_losses": self.consecutive_losses,
+            **base_status,
             "daily_trades": self.daily_trades,
-            "max_daily_trades": settings.MAX_DAILY_TRADES,
-            "max_consecutive_losses": settings.MAX_CONSECUTIVE_LOSSES,
+            "consecutive_losses": self.consecutive_losses,
+            "peak_balance": round(self.peak_balance, 2),
+            "current_balance": round(self.current_balance, 2),
+            "drawdown_pct": round(
+                (self.peak_balance - self.current_balance) / self.peak_balance * 100, 2
+            ) if self.peak_balance > 0 else 0,
+            "emergency_stop": settings.EMERGENCY_STOP,
+        }
+
+    async def get_risk_summary(self) -> Dict[str, Any]:
+        base_status = await self.base.get_status_summary()
+        return {
+            **base_status,
+            "daily_trades": self.daily_trades,
+            "consecutive_losses": self.consecutive_losses,
+            "peak_balance": round(self.peak_balance, 2),
+            "current_balance": round(self.current_balance, 2),
+            "drawdown_pct": round(
+                (self.peak_balance - self.current_balance) / self.peak_balance * 100, 2
+            ) if self.peak_balance > 0 else 0,
+            "emergency_stop": settings.EMERGENCY_STOP,
         }

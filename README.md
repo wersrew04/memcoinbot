@@ -69,11 +69,18 @@ Scanner (60s) → FilterPipeline → Risk pre-check → Jupiter BUY
 - `/start` yoki ▶️ Start – botni yoqish
 - `/stop` – to‘xtatish
 - `/positions` – ochiq pozitsiyalar
-- `/status` – daily loss, running state
+- `/status` – daily loss, running state + hamyon
 - `/stats` – qisqa statistika
 - `/restart` – qayta ishga tushirish
 - `/clean` yoki 🧹 Tozalash – ghost pozitsiyalar, cooldown, scanner cache + on-chain sinxron
 - `/clean_all` – kuchli tozalash (+ kunlik zarar reset, tarix)
+- `/wallet` yoki 👛 Hamyon – hamyon holati va SOL balansi
+- `/set_wallet <private_key>` – Phantom/Solflare base58 private key bilan hamyon ulash
+- `/clear_wallet` – hamyonni uzish
+- `/buy` yoki 💰 Savdo ochish – token manzilini yuboring, bot sotib oladi
+- `/add_admin <chat_id>` yoki 👤 Admin qo‘shish – yangi admin qo‘shish
+- `/admins` – adminlar ro‘yxati
+- 🔍 Token Tekshirish – token tahlili (filtrl + AI)
 
 ## Xavfsizlik ogohlantirishlari
 

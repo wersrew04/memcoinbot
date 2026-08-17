@@ -1,236 +1,422 @@
-"""Meme Coin Auto Trading Bot – extended with AI, Smart Money, Whale, MEV, Admin."""
+"""
+MemeBot Pro — asosiy ishga tushirish fayli.
+Paper va Live rejim to'liq qo'llab-quvvatlanadi.
+"""
 from __future__ import annotations
-
 import asyncio
+import os
 import signal
+import sys
+from pathlib import Path
+from typing import Optional
+
+Path("data").mkdir(exist_ok=True)
+Path("logs").mkdir(exist_ok=True)
+
 from utils.logger import logger
 from config.settings import settings
 from risk.manager import RiskManager
-from scanner.new_pairs import NewPairsScanner
-from telegram.bot import TelegramBotService
-from buy.executor import BuyExecutor
-from sell.monitor import PositionMonitor
-from buy.jupiter import JupiterSwap
-from wallet.rpc import SolanaRPC
-from wallet.keypair import load_keypair, get_pubkey
-
-# New modules
+from advanced_risk.manager import AdvancedRiskManager
+from blacklist.manager import BlacklistManager
 from ai_engine.scorer import AIScorer
 from ai_engine.learner import TradeLearner
-from smart_money.tracker import SmartMoneyTracker
-from whale_tracking.monitor import WhaleMonitor
-from mev_protection.protector import MEVProtector
-from blacklist.manager import BlacklistManager
-from advanced_risk.manager import AdvancedRiskManager
-from portfolio.manager import PortfolioManager
-from notifications.service import NotificationService
-from monitoring.health import HealthMonitor
+from scanner.dexscreener import fetch_new_pairs
 from filters.pipeline import FilterPipeline
-from social_intelligence.analyzer import SocialAnalyzer
-from admin_panel.app import create_admin_app
-from utils.cleanup import cleaner
+from buy.executor import execute_buy
+from sell.monitor import PositionMonitor
+from telegram.notifier import TelegramNotifier
+from telegram.bot import TelegramBot
+from utils.history import history
+import aiohttp
 
 
 class MemeBot:
     def __init__(self):
-        self.rpc = SolanaRPC()
         self.risk = RiskManager()
-        self.jupiter = JupiterSwap(self.rpc)
-        self.telegram = TelegramBotService(self.risk)
-
-        # New services
-        self.learner = TradeLearner()
-        self.ai_scorer = AIScorer(custom_weights=self.learner.get_weights())
-        self.smart_money = SmartMoneyTracker()
-        self.whale = WhaleMonitor()
-        self.social = SocialAnalyzer()
-        self.mev = MEVProtector()
-        self.blacklist = BlacklistManager()
         self.advanced_risk = AdvancedRiskManager(self.risk)
-        self.portfolio = PortfolioManager(self.risk)
-        self.notifications = NotificationService(telegram_bot=self.telegram)
-        self.health = HealthMonitor(rpc=self.rpc)
-        # Ma'lumotlarni tozalash + real hamyon sinxroni
-        cleaner.attach(risk=self.risk, rpc=self.rpc)
-        self.cleaner = cleaner
-        self.telegram.cleaner = cleaner
+        self.blacklist = BlacklistManager()
+        self.scorer = AIScorer()
+        self.learner = TradeLearner()
+        self.filter_pipeline = FilterPipeline(self.blacklist)
+        self.monitor = PositionMonitor(self.risk)
+        self.notifier = TelegramNotifier()
+        self.tg_bot = TelegramBot(bot_ref=self)
+        self.monitor.tg = self.notifier
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._tasks = []
+        self._shutdown_event = asyncio.Event()
 
-        self.pipeline = FilterPipeline(
-            blacklist=self.blacklist,
-            ai_scorer=self.ai_scorer,
-            smart_money=self.smart_money,
-            whale_monitor=self.whale,
-            social=self.social,
-        )
-
-        self.buy_executor = BuyExecutor(
-            risk=self.risk,
-            jupiter=self.jupiter,
-            rpc=self.rpc,
-            telegram=self.telegram,
-            advanced_risk=self.advanced_risk,
-            mev=self.mev,
-            portfolio=self.portfolio,
-            notifications=self.notifications,
-        )
-        self.monitor = PositionMonitor(
-            risk=self.risk,
-            jupiter=self.jupiter,
-            rpc=self.rpc,
-            telegram=self.telegram,
-            advanced_risk=self.advanced_risk,
-            learner=self.learner,
-            notifications=self.notifications,
-        )
-        self.telegram.monitor = self.monitor
-        self.scanner = NewPairsScanner(
-            on_passed=self._on_token_passed,
-            pipeline=self.pipeline,
-        )
-        self._tasks: list[asyncio.Task] = []
-        self._admin_server = None
-
-    async def _on_token_passed(self, token_data: dict):
-        if not await self.risk.is_bot_running():
-            return
-        await self.buy_executor.try_buy(token_data)
+    # ─────────────── ISHGA TUSHIRISH ───────────────
 
     async def start(self):
-        logger.info("=" * 60)
-        logger.info("Solana Mem Coin Auto Trading Bot (Extended)")
-        logger.info(f"  PAPER_TRADING : {settings.PAPER_TRADING}")
-        logger.info(f"  Trade amount  : ${settings.TRADE_AMOUNT_USD}")
-        logger.info(f"  Max positions : {settings.MAX_OPEN_POSITIONS}")
-        logger.info(
-            f"  SL / TP / Trail: {settings.STOP_LOSS_PCT*100:.0f}% / "
-            f"{settings.TAKE_PROFIT_PCT*100:.0f}% / {settings.TRAILING_STOP_PCT*100:.0f}%"
-        )
-        logger.info(f"  Max daily loss: ${settings.MAX_DAILY_LOSS_USD}")
-        logger.info(f"  AI Engine     : {settings.AI_ENABLED} (min score {settings.AI_MIN_SCORE})")
-        logger.info(f"  Smart Money   : {settings.SMART_MONEY_ENABLED}")
-        logger.info(f"  Whale Track   : {settings.WHALE_TRACKING_ENABLED}")
-        logger.info(f"  MEV Protect   : {settings.MEV_PROTECTION_ENABLED}")
-        logger.info(f"  Auto Blacklist: {settings.AUTO_BLACKLIST_ENABLED}")
-        pk = get_pubkey()
-        if pk:
-            logger.info(f"  Wallet        : {pk[:8]}...{pk[-6:]}")
-        else:
-            logger.warning("  Wallet        : PRIVATE_KEY yo'q (faqat paper ishlaydi)")
-        logger.info("=" * 60)
+        logger.info("=" * 55)
+        logger.info("  MemeBot Pro  |  Solana Memecoin Trader")
+        logger.info("=" * 55)
+        logger.info("Rejim    : {}".format("PAPER (simulyatsiya)" if settings.PAPER_TRADING else "LIVE ⚠️"))
+        logger.info("Trade    : ${:.2f}".format(settings.TRADE_AMOUNT_USD))
+        logger.info("TP / SL  : {:.0f}% / {:.0f}%".format(
+            settings.TAKE_PROFIT_PCT * 100, settings.STOP_LOSS_PCT * 100
+        ))
+        logger.info("Trailing : {:.0f}%".format(settings.TRAILING_STOP_PCT * 100))
+        logger.info("AI score : {:.0f}+".format(settings.AI_MIN_SCORE))
+        logger.info("=" * 55)
 
-        await self.risk.connect()
-        await self.risk.set_bot_running(True)
+        connector = aiohttp.TCPConnector(limit=60, ttl_dns_cache=300, ssl=False)
+        timeout = aiohttp.ClientTimeout(total=30, connect=10)
+        self._session = aiohttp.ClientSession(connector=connector, timeout=timeout)
 
-        # Start oldidan ma'lumotlarni tozalash / on-chain sinxronlash
-        # (ghost pozitsiyalar, eskirgan cooldown, scanner cache)
-        try:
-            cleanup_report = await self.cleaner.full_cleanup(
-                reconcile=True,
-                clear_cooldowns=False,  # faqat eskirganlar – start da barchasini o'chirmaymiz
-                clear_processed=False,
-                reset_daily_loss=False,
-                clear_history=False,
-                clear_positions=False,
-            )
-            # Faqat muddati o'tgan cooldownlar
-            await self.cleaner.clear_expired_cooldowns()
-            removed = len((cleanup_report.get("reconcile") or {}).get("removed") or [])
-            synced = len((cleanup_report.get("reconcile") or {}).get("synced") or [])
-            if removed or synced:
-                logger.info(
-                    f"Start cleanup: ghost={removed}, synced={synced}"
+        self.monitor.set_session(self._session)
+        self.notifier.set_session(self._session)
+        self.tg_bot.set_session(self._session)
+
+        settings.BOT_RUNNING = True
+
+        # Hamyon ma'lumotlari
+        wallet_info = ""
+        if not settings.PAPER_TRADING and settings.PRIVATE_KEY:
+            from wallet.keypair import get_pubkey, get_sol_balance
+            pubkey = get_pubkey()
+            if pubkey:
+                sol_bal = await get_sol_balance(self._session, pubkey)
+                wallet_info = "\n👛 Hamyon: <code>{}</code>\n💎 SOL: {:.4f}".format(
+                    pubkey[:20] + "...", sol_bal
                 )
-        except Exception as e:
-            logger.warning(f"Start cleanup xato (davom etiladi): {e}")
 
-        await self.telegram.start()
-
-        scan_task = asyncio.create_task(
-            self.scanner.run_loop(interval_sec=settings.SCANNER_INTERVAL_SEC)
-        )
-        self._tasks.append(scan_task)
-
-        mon_task = asyncio.create_task(self.monitor.run_loop())
-        self._tasks.append(mon_task)
-
-        health_task = asyncio.create_task(self.health.run_loop())
-        self._tasks.append(health_task)
-
-        try:
-            import os
-            import uvicorn
-            # Railway / Render / Heroku set $PORT – use it so public URL works
-            port = int(os.environ.get("PORT", settings.ADMIN_API_PORT))
-            host = settings.ADMIN_API_HOST or "0.0.0.0"
-            app = create_admin_app(bot_ref=self)
-            config = uvicorn.Config(
-                app,
-                host=host,
-                port=port,
-                log_level="warning",
+        await self.notifier.send_message(
+            "🚀 <b>MemeBot Pro ishga tushdi!</b>\n\n"
+            "Mode: <b>{}</b>{}\n"
+            "Trade: <b>${:.2f}</b>\n"
+            "TP: <b>{:.0f}%</b> | SL: <b>{:.0f}%</b> | Trail: <b>{:.0f}%</b>\n"
+            "AI min: <b>{:.0f}</b>\n\n"
+            "Buyruqlar:\n"
+            "/start /stop /positions /status /stats /wallet".format(
+                "PAPER" if settings.PAPER_TRADING else "⚠️ LIVE",
+                wallet_info,
+                settings.TRADE_AMOUNT_USD,
+                settings.TAKE_PROFIT_PCT * 100,
+                settings.STOP_LOSS_PCT * 100,
+                settings.TRAILING_STOP_PCT * 100,
+                settings.AI_MIN_SCORE,
             )
-            server = uvicorn.Server(config)
-            admin_task = asyncio.create_task(server.serve())
-            self._tasks.append(admin_task)
-            self._admin_server = server
-            logger.info(f"Admin API: http://{host}:{port}")
-        except Exception as e:
-            logger.warning(f"Admin API ishga tushmadi: {e}")
+        )
 
-        logger.info("Bot ishga tushdi. Ctrl+C bilan to'xtating.")
-        if settings.PAPER_TRADING:
-            logger.info("⚠️  PAPER MODE – real tranzaksiya yuborilmaydi.")
+        # Shutdown signal
+        loop = asyncio.get_event_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, self._shutdown_event.set)
+            except NotImplementedError:
+                pass
+
+        # Vazifalar
+        self._tasks = [
+            asyncio.create_task(self._scanner_loop(), name="scanner"),
+            asyncio.create_task(self._monitor_loop(), name="monitor"),
+            asyncio.create_task(self.tg_bot.start_polling(), name="tg_bot"),
+            asyncio.create_task(self._start_admin(), name="admin"),
+            asyncio.create_task(self._daily_reset_loop(), name="daily_reset"),
+        ]
+
+        # Shutdown signalini kutish
+        await self._shutdown_event.wait()
+        await self.stop()
+
+    async def stop(self):
+        logger.info("Bot to'xtatilmoqda...")
+        settings.BOT_RUNNING = False
+
+        for t in self._tasks:
+            if not t.done():
+                t.cancel()
+
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+
+        if self._session and not self._session.closed:
+            await self._session.close()
 
         try:
-            await asyncio.gather(*self._tasks)
-        except asyncio.CancelledError:
+            await self.notifier.send_message("⏹ <b>MemeBot Pro to'xtatildi</b>")
+        except Exception:
             pass
 
-    async def shutdown(self):
-        logger.info("Bot to'xtatilmoqda...")
-        self.scanner.stop()
-        self.monitor.stop()
-        self.health.stop()
-        await self.risk.set_bot_running(False)
-        for t in self._tasks:
-            t.cancel()
-        if self._admin_server:
-            self._admin_server.should_exit = True
-        await self.telegram.stop()
-        await self.risk.close()
-        await self.rpc.close()
+        logger.info("Bot to'xtatildi. Xayr!")
 
-        # Persistent httpx clients (BirdeyeClient / XApiClient keep one alive per instance)
-        for obj in (
-            getattr(self.scanner, "birdeye", None),
-            getattr(self.monitor, "birdeye", None),
-            getattr(self.jupiter, "_sol_price_client", None),
-            self.social,
-        ):
-            if obj is not None:
+    # ─────────────── SCANNER LOOP ───────────────
+
+    async def _scanner_loop(self):
+        logger.info("[SCANNER] Boshlandi — interval: {}s".format(settings.SCANNER_INTERVAL_SEC))
+        await asyncio.sleep(5)   # Boshqa modullarga vaqt berish
+        while True:
+            try:
+                if settings.BOT_RUNNING and not settings.EMERGENCY_STOP:
+                    await self._scan_once()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("[SCANNER] Xato: {}".format(e))
+                history.add_event("ERROR", "Scanner xato: {}".format(e))
+            await asyncio.sleep(settings.SCANNER_INTERVAL_SEC)
+
+    async def _scan_once(self):
+        """Bir marta skanerlash tsikli."""
+        try:
+            pairs = await fetch_new_pairs(
+                self._session,
+                min_liquidity=settings.MIN_LIQUIDITY_USD
+            )
+        except Exception as e:
+            logger.warning("[SCAN] DexScreener xato: {}".format(e))
+            return
+
+        if not pairs:
+            return
+
+        logger.info("[SCAN] {} ta juftlik topildi".format(len(pairs)))
+
+        for pair in pairs:
+            token = pair.get("token", "")
+            if not token:
+                continue
+
+            # Risk tekshiruvi
+            ok, reason = await self.advanced_risk.pre_trade_check(
+                token, settings.TRADE_AMOUNT_USD
+            )
+            if not ok:
+                logger.debug("[SKIP] {} — {}".format(pair.get("symbol", "?"), reason))
+                continue
+
+            # Filter pipeline
+            passed, reason, enriched = await self.filter_pipeline.run(
+                pair, self._session
+            )
+            if not passed:
+                continue
+
+            # AI baholash
+            ai_result = self.scorer.score(enriched)
+            enriched["ai_score"] = ai_result.score
+            enriched["ai_rec"] = ai_result.recommendation.value
+
+            logger.info(
+                "[AI] {} score={:.1f} rec={} signals={} warns={}".format(
+                    enriched.get("symbol", "?"),
+                    ai_result.score,
+                    ai_result.recommendation.value,
+                    len(ai_result.signals),
+                    len(ai_result.warnings),
+                )
+            )
+
+            # Threshold tekshiruvi
+            if not self.scorer.passes_threshold(ai_result):
+                history.add_rejection(
+                    enriched.get("symbol", "?"), token,
+                    "ai", "Score past: {:.1f}".format(ai_result.score)
+                )
+                continue
+
+            # Xarid
+            await self._execute_trade(token, enriched, ai_result)
+
+            # Har bir juftlik o'rtasida kichik pauza
+            await asyncio.sleep(0.5)
+
+    # ─────────────── SAVDO BAJARISH ───────────────
+
+    async def _execute_trade(self, token: str, data: dict, ai_result):
+        symbol = data.get("symbol", token[:8])
+        price = safe_float(data.get("price_usd"))
+        amount = settings.TRADE_AMOUNT_USD
+
+        if price <= 0:
+            logger.warning("[BUY] {} narxi 0 — o'tkazib yuborildi".format(symbol))
+            return
+
+        success, position = await execute_buy(
+            token=token,
+            symbol=symbol,
+            amount_usd=amount,
+            current_price=price,
+            session=self._session,
+            paper=settings.PAPER_TRADING,
+        )
+        if not success:
+            err = position.get("error", "Noma'lum xato")
+            logger.warning("[BUY FAIL] {} — {}".format(symbol, err))
+            return
+
+        position["ai_score"] = ai_result.score
+        position["ai_breakdown"] = ai_result.breakdown
+        position["high_price"] = price
+
+        opened = await self.risk.open_position(token, position)
+        if not opened:
+            logger.warning("[BUY] {} — pozitsiya ochmadi (allaqachon bor?)".format(symbol))
+            return
+
+        self.advanced_risk.daily_trades += 1
+
+        # Bildirishnoma
+        if settings.NOTIFY_TELEGRAM and settings.NOTIFY_ON_BUY:
+            signals_text = ""
+            if ai_result.signals:
+                signals_text = "\n📋 " + "\n📋 ".join(ai_result.signals[:3])
+            warns_text = ""
+            if ai_result.warnings:
+                warns_text = "\n⚠️ " + "\n⚠️ ".join(ai_result.warnings[:2])
+
+            tx_line = ""
+            if not position.get("paper") and position.get("tx_hash"):
+                tx_line = "\n🔗 TX: <code>{}</code>".format(
+                    position["tx_hash"][:20] + "..."
+                )
+
+            await self.notifier.send_message(
+                "🟢 <b>XARID: {}</b>\n\n"
+                "💰 Miqdor: <b>${:.2f}</b>\n"
+                "📈 Narx: <b>${:.10f}</b>\n"
+                "🤖 AI: <b>{:.1f}</b> ({})\n"
+                "💧 Liq: ${:,.0f}\n"
+                "📊 Vol5m: ${:,.0f}\n"
+                "👤 Holderlar: {:,}{}{}{}\n"
+                "{}".format(
+                    symbol,
+                    amount, price,
+                    ai_result.score, ai_result.recommendation.value,
+                    data.get("liquidity_usd", 0),
+                    data.get("volume_5m", 0),
+                    data.get("holder_count", 0),
+                    signals_text,
+                    warns_text,
+                    tx_line,
+                    "PAPER" if settings.PAPER_TRADING else "⚠️ LIVE",
+                )
+            )
+
+    # ─────────────── MONITOR LOOP ───────────────
+
+    async def _monitor_loop(self):
+        logger.info("[MONITOR] Boshlandi — interval: {}s".format(
+            settings.POSITION_MONITOR_INTERVAL_SEC
+        ))
+        while True:
+            try:
+                if settings.BOT_RUNNING:
+                    await self.monitor.check_positions()
+                    await self._update_learner()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("[MONITOR] Xato: {}".format(e))
+            await asyncio.sleep(settings.POSITION_MONITOR_INTERVAL_SEC)
+
+    async def _update_learner(self):
+        """Yopilgan savdolarni learner ga yuborish."""
+        trades = history.list_trades(limit=5)
+        for trade in trades:
+            if trade.get("_learned"):
+                continue
+            if trade.get("ai_score") is not None:
                 try:
-                    await obj.close()
-                except Exception as e:
-                    logger.debug(f"Birdeye client yopishda xato: {e}")
+                    self.learner.record_trade(
+                        symbol=trade.get("symbol", "?"),
+                        token=trade.get("token", ""),
+                        pnl_pct=trade.get("pnl_pct", 0),
+                        score_breakdown=trade.get("ai_breakdown") or {},
+                        reason=trade.get("reason", ""),
+                    )
+                    trade["_learned"] = True
+                except Exception:
+                    pass
+            # Advanced risk ni yangilash
+            pnl_usd = trade.get("pnl_usd", 0)
+            self.advanced_risk.record_trade_result(pnl_usd)
 
-        logger.info("Bot to'xtatildi.")
+    # ─────────────── DAILY RESET ───────────────
 
+    async def _daily_reset_loop(self):
+        """Har kuni yarim tunda statistikani yangilash."""
+        while True:
+            try:
+                from utils.helpers import utc_now
+                now = utc_now()
+                # Keyingi yarim tunga qadar necha soniya
+                seconds_until_midnight = (
+                    (24 - now.hour) * 3600 - now.minute * 60 - now.second
+                )
+                await asyncio.sleep(seconds_until_midnight)
+                from utils.history import reset_today_stats
+                try:
+                    reset_today_stats()
+                except Exception:
+                    pass
+                await self.risk.reset_daily_loss()
+                self.advanced_risk.daily_trades = 0
+                self.advanced_risk.consecutive_losses = 0
+                self.risk.clear_processed()
+                logger.info("Kunlik statistika yangilandi")
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Daily reset xato: {}".format(e))
+                await asyncio.sleep(3600)
+
+    # ─────────────── ADMIN PANEL ───────────────
+
+    async def _start_admin(self):
+        try:
+            import uvicorn
+            from admin_panel.app import create_admin_app
+            app = create_admin_app(bot_ref=self)
+            port = int(os.environ.get("PORT") or settings.ADMIN_API_PORT)
+            config = uvicorn.Config(
+                app,
+                host=settings.ADMIN_API_HOST,
+                port=port,
+                log_level="warning",
+                access_log=False,
+            )
+            server = uvicorn.Server(config)
+            logger.info("Admin panel: http://{}:{}".format(
+                settings.ADMIN_API_HOST, port
+            ))
+            await server.serve()
+        except ImportError:
+            logger.warning("uvicorn o'rnatilmagan — admin panel o'chirilgan")
+            while True:
+                await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error("Admin panel xato: {}".format(e))
+
+
+def safe_float(val, default=0.0):
+    try:
+        return float(val) if val is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
+# ─────────────── MAIN ───────────────
 
 async def main():
     bot = MemeBot()
-
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, lambda: asyncio.create_task(bot.shutdown()))
-        except NotImplementedError:
-            pass
-
     try:
         await bot.start()
     except KeyboardInterrupt:
-        await bot.shutdown()
+        logger.info("Foydalanuvchi to'xtatdi (Ctrl+C)")
+    except Exception as e:
+        logger.exception("Kutilmagan xato: {}".format(e))
+    finally:
+        if not bot._shutdown_event.is_set():
+            bot._shutdown_event.set()
 
 
 if __name__ == "__main__":
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())

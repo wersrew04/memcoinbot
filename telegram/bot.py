@@ -1,306 +1,596 @@
-"""Telegram bot – start/stop, positions, balance, trade xabarlari. To'liq o'zbek tilida."""
+"""Telegram bot — buyruqlar: /start /stop /positions /status /stats /wallet."""
 from __future__ import annotations
-
 import asyncio
-import html
-from typing import Optional, Any
-from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from typing import Optional
 from utils.logger import logger
-from config.settings import settings
-from risk.manager import RiskManager
+from utils.helpers import utc_now, safe_float
 from utils.history import history
-
-BTN_START = "▶️ Ishga tushirish"
-BTN_STOP = "⏹ To'xtatish"
-BTN_POSITIONS = "📊 Pozitsiyalar"
-BTN_STATUS = "💰 Holat"
-BTN_STATS = "📈 Statistika"
-BTN_RESTART = "🔄 Qayta ishga tushirish"
-BTN_CLEAN = "🧹 Tozalash"
+from config.settings import settings
+from telegram.notifier import TelegramNotifier
+import aiohttp
 
 
-class TelegramBotService:
-    def __init__(self, risk_manager: RiskManager):
-        self.token = settings.TELEGRAM_BOT_TOKEN
-        self.chat_id = settings.TELEGRAM_CHAT_ID
-        self.risk = risk_manager
-        self.bot: Optional[Bot] = None
-        self.dp: Optional[Dispatcher] = None
-        self._task: Optional[asyncio.Task] = None
-        self.monitor: Optional[Any] = None
-        self.cleaner: Optional[Any] = None
+class TelegramBot:
+    def __init__(self, bot_ref=None):
+        self.bot_ref = bot_ref
+        self.notifier = TelegramNotifier()
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._offset: int = 0
+        self._running: bool = False
+        self._states = {}  # chat_id -> state
 
-    def _keyboard(self) -> ReplyKeyboardMarkup:
-        return ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text=BTN_START), KeyboardButton(text=BTN_STOP)],
-                [KeyboardButton(text=BTN_POSITIONS), KeyboardButton(text=BTN_STATUS)],
-                [KeyboardButton(text=BTN_STATS), KeyboardButton(text=BTN_RESTART)],
-                [KeyboardButton(text=BTN_CLEAN)],
-            ],
-            resize_keyboard=True,
-        )
+    def set_session(self, session: aiohttp.ClientSession):
+        self._session = session
+        self.notifier.set_session(session)
 
-    async def start(self):
-        if not self.token:
-            logger.warning("TELEGRAM_BOT_TOKEN yo'q – Telegram o'chirilgan")
-            return
-        self.bot = Bot(token=self.token)
-        self.dp = Dispatcher()
-        self._register_handlers()
-        self._task = asyncio.create_task(self.dp.start_polling(self.bot))
-        logger.info("Telegram bot ishga tushdi")
-        await self.send_message(
-            "🤖 MemeBot Telegram ishga tushdi.\n"
-            "Quyidagi menyudan foydalaning yoki buyruqlar: "
-            "/start /stop /positions /status /stats /restart /clean"
-        )
+    async def start_polling(self):
+        self._running = True
+        logger.info("Telegram bot polling boshlandi")
+        while self._running:
+            try:
+                await self._poll()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"Telegram poll xato: {e}")
+            await asyncio.sleep(2)
 
     async def stop(self):
-        if self._task:
-            self._task.cancel()
+        self._running = False
+
+    async def _poll(self):
+        if not settings.TELEGRAM_BOT_TOKEN:
+            await asyncio.sleep(10)
+            return
+        url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/getUpdates"
+        params = {"timeout": 20, "offset": self._offset, "limit": 10}
+        try:
+            async with self._session.get(url, params=params,
+                                          timeout=aiohttp.ClientTimeout(total=30)) as r:
+                if r.status != 200:
+                    return
+                data = await r.json()
+                updates = data.get("result") or []
+                for upd in updates:
+                    self._offset = upd["update_id"] + 1
+                    await self._handle_update(upd)
+        except asyncio.TimeoutError:
+            pass
+
+    def _get_inline_keyboard(self) -> dict:
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "▶️ Start", "callback_data": "start"},
+                    {"text": "⏹ Stop", "callback_data": "stop"},
+                ],
+                [
+                    {"text": "💰 Savdo ochish", "callback_data": "open_trade"},
+                    {"text": "🔍 Token Tekshirish", "callback_data": "check_token"},
+                ],
+                [
+                    {"text": "📊 Positions", "callback_data": "positions"},
+                    {"text": "📈 Status", "callback_data": "status"},
+                ],
+                [
+                    {"text": "🏆 Stats", "callback_data": "stats"},
+                    {"text": "👛 Hamyon", "callback_data": "wallet"},
+                ],
+                [
+                    {"text": "🧹 Tozalash", "callback_data": "clean"},
+                    {"text": "👤 Admin qo'shish", "callback_data": "add_admin"},
+                ],
+                [
+                    {"text": "🔄 Restart", "callback_data": "restart"},
+                ]
+            ]
+        }
+
+    async def _handle_update(self, update: dict):
+        cb_query = update.get("callback_query")
+        if cb_query:
+            msg = cb_query.get("message") or {}
+            chat_id = str(msg.get("chat", {}).get("id", ""))
+            
+            allowed_chat_ids = [x.strip() for x in str(settings.TELEGRAM_CHAT_ID).split(",") if x.strip()]
+            if allowed_chat_ids and chat_id not in allowed_chat_ids:
+                return
+                
+            data = cb_query.get("data", "")
+            
+            # Answer callback query to stop loading spinner
             try:
-                await self._task
-            except asyncio.CancelledError:
+                url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
+                await self._session.post(url, json={"callback_query_id": cb_query["id"]})
+            except Exception:
                 pass
-        if self.bot:
-            await self.bot.session.close()
-        logger.info("Telegram bot to'xtatildi")
+                
+            if data == "start":
+                await self._cmd_start()
+            elif data == "stop":
+                await self._cmd_stop()
+            elif data == "positions":
+                await self._cmd_positions()
+            elif data == "status":
+                await self._cmd_status()
+            elif data == "stats":
+                await self._cmd_stats()
+            elif data == "wallet":
+                await self._cmd_wallet()
+            elif data == "clean":
+                await self._cmd_clean()
+            elif data == "restart":
+                settings.BOT_RUNNING = True
+                await self.notifier.send_message("🔄 Bot qayta ishga tushirildi", reply_markup=self._get_inline_keyboard())
+            elif data == "check_token":
+                self._states[chat_id] = "awaiting_token"
+                await self.notifier.send_message(
+                    "🔍 Iltimos, tekshirmoqchi bo'lgan Solana token manzilingizni yuboring (Mint address):",
+                    reply_markup=self._get_inline_keyboard()
+                )
+            elif data == "open_trade":
+                self._states[chat_id] = "awaiting_buy_token"
+                await self.notifier.send_message(
+                    "💰 <b>Savdo ochish</b>\n\n"
+                    "Sotib olmoqchi bo'lgan Solana token manzilini (Mint address) yuboring.\n"
+                    f"Miqdor: <b>${settings.TRADE_AMOUNT_USD:.2f}</b>\n"
+                    f"Rejim: <b>{'PAPER' if settings.PAPER_TRADING else 'LIVE'}</b>",
+                    reply_markup=self._get_inline_keyboard()
+                )
+            elif data == "add_admin":
+                self._states[chat_id] = "awaiting_admin_id"
+                await self.notifier.send_message(
+                    "👤 <b>Yangi admin qo'shish</b>\n\n"
+                    "Yangi adminning Telegram chat ID sini yuboring (raqam).\n"
+                    "Masalan: <code>123456789</code>\n\n"
+                    "Chat ID ni bilish: @userinfobot yoki @getidsbot ga yozing.",
+                    reply_markup=self._get_inline_keyboard()
+                )
+            return
 
-    def _register_handlers(self):
-        assert self.dp is not None
+        msg = update.get("message")
+        if not msg:
+            return
+        text = msg.get("text", "").strip()
+        chat_id = str(msg.get("chat", {}).get("id", ""))
 
-        @self.dp.message(Command("start"))
-        @self.dp.message(F.text == BTN_START)
-        async def cmd_start(message: Message):
-            if not self._authorized(message):
+        allowed_chat_ids = [x.strip() for x in str(settings.TELEGRAM_CHAT_ID).split(",") if x.strip()]
+        if allowed_chat_ids and chat_id not in allowed_chat_ids:
+            return
+
+        # State: token tekshirish
+        if self._states.get(chat_id) == "awaiting_token":
+            self._states[chat_id] = None
+            if len(text) >= 30 and not text.startswith("/"):
+                await self.notifier.send_message(f"⏳ <code>{text[:15]}...</code> token tahlil qilinmoqda...")
+                result_text = await self._check_token_info(text)
+                await self.notifier.send_message(result_text, reply_markup=self._get_inline_keyboard())
                 return
-            await self.risk.set_bot_running(True)
-            await message.answer("✅ Bot <b>ishga tushirildi</b>", parse_mode="HTML", reply_markup=self._keyboard())
-
-        @self.dp.message(Command("stop"))
-        @self.dp.message(F.text == BTN_STOP)
-        async def cmd_stop(message: Message):
-            if not self._authorized(message):
-                return
-            await self.risk.set_bot_running(False)
-            await message.answer("🛑 Bot <b>to'xtatildi</b>", parse_mode="HTML", reply_markup=self._keyboard())
-
-        @self.dp.message(Command("positions"))
-        @self.dp.message(F.text == BTN_POSITIONS)
-        async def cmd_positions(message: Message):
-            if not self._authorized(message):
-                return
-            pos = await self.risk.get_open_positions()
-            if not pos:
-                await message.answer("Ochiq pozitsiya yo'q.", reply_markup=self._keyboard())
+            else:
+                await self.notifier.send_message("❌ Yaroqsiz token manzili yuborildi.", reply_markup=self._get_inline_keyboard())
                 return
 
-            # Ochiq pozitsiyalar uchun narxlarni parallel ravishda yangilaymiz (agar monitor mavjud bo'lsa)
-            if self.monitor:
-                async def _update_price(tok: str):
+        # State: savdo ochish (token yuboriladi → bot sotib oladi)
+        if self._states.get(chat_id) == "awaiting_buy_token":
+            self._states[chat_id] = None
+            if len(text) >= 30 and not text.startswith("/"):
+                await self.notifier.send_message(
+                    f"⏳ <code>{text[:15]}...</code> uchun savdo ochilmoqda...\n"
+                    f"Miqdor: ${settings.TRADE_AMOUNT_USD:.2f}"
+                )
+                result_text = await self._open_manual_trade(text)
+                await self.notifier.send_message(result_text, reply_markup=self._get_inline_keyboard())
+                return
+            else:
+                await self.notifier.send_message("❌ Yaroqsiz token manzili yuborildi.", reply_markup=self._get_inline_keyboard())
+                return
+
+        # State: yangi admin qo'shish
+        if self._states.get(chat_id) == "awaiting_admin_id":
+            self._states[chat_id] = None
+            new_id = text.strip()
+            if new_id.isdigit() and len(new_id) >= 5:
+                ok, msg = self._add_admin(new_id)
+                await self.notifier.send_message(msg, reply_markup=self._get_inline_keyboard())
+                return
+            else:
+                await self.notifier.send_message(
+                    "❌ Yaroqsiz chat ID. Faqat raqam yuboring (masalan: 123456789).",
+                    reply_markup=self._get_inline_keyboard()
+                )
+                return
+
+        # Check if text is a potential private key (base58, usually 87-88 chars)
+        if len(text) >= 80 and not text.startswith("/"):
+            try:
+                import base58
+                decoded = base58.b58decode(text)
+                if len(decoded) in (32, 64):
+                    from solders.keypair import Keypair
+                    kp = Keypair.from_base58_string(text)
+                    settings.PRIVATE_KEY = text
+                    # Persist to .env
                     try:
-                        price = await self.monitor.get_current_price(tok)
-                        if price > 0:
-                            await self.risk.update_position(tok, {"current_price": price})
+                        from dotenv import set_key
+                        from pathlib import Path
+                        env_file = Path(__file__).resolve().parent.parent / ".env"
+                        set_key(str(env_file), "PRIVATE_KEY", text)
                     except Exception:
                         pass
-                await asyncio.gather(*(_update_price(tok) for tok in pos.keys()))
-                # Qayta o'qiymiz yangilangan narxlar bilan
-                pos = await self.risk.get_open_positions()
+                    await self.notifier.send_message(
+                        f"✅ Hamyon ulandi!\n"
+                        f"Manzil: <code>{str(kp.pubkey())}</code>\n"
+                        f"Rejim: {'PAPER' if settings.PAPER_TRADING else 'LIVE'}",
+                        reply_markup=self._get_inline_keyboard()
+                    )
+                    return
+            except Exception:
+                pass
 
-            lines = []
-            for token, p in pos.items():
-                entry = float(p.get("entry_price") or 0)
-                amount = float(p.get("amount_usd") or 0)
-                symbol = p.get("symbol", token[:8])
-                price = p.get("current_price")
-                
-                if price:
-                    price_val = float(price)
-                    pnl_pct = ((price_val / entry) - 1.0) * 100.0 if entry > 0 else 0.0
-                    pnl_usd = amount * (price_val / entry - 1.0) if entry > 0 else 0.0
-                    emoji = "🟢" if pnl_pct >= 0 else "🔴"
-                    pnl_text = f"{emoji} PnL: ${pnl_usd:+.2f} ({pnl_pct:+.1f}%)"
-                    price_text = f"${price_val:.8f}"
-                else:
-                    pnl_text = "⏳ PnL: kutilmoqda..."
-                    price_text = "kutilmoqda..."
-                
-                lines.append(
-                    f"• <b>{html.escape(symbol)}</b>\n"
-                    f"  Kirish: ${entry:.8f} | Joriy: {price_text}\n"
-                    f"  Hajm: ${amount:.2f} | {pnl_text}\n"
-                    f"  Manzil: <code>{html.escape(token)}</code>\n"
-                )
-
-            # Xabarni qismlarga bo'lib yuborish (Telegram 4096 belgi limiti tufayli)
-            header = f"📊 <b>Ochiq pozitsiyalar ({len(pos)}):</b>\n\n"
-            current_chunk = header
-            chunks = []
-            for line in lines:
-                if len(current_chunk) + len(line) + 2 > 4000:
-                    chunks.append(current_chunk)
-                    current_chunk = ""
-                current_chunk += line + "\n"
-            if current_chunk:
-                chunks.append(current_chunk)
-
-            for i, chunk in enumerate(chunks):
-                # Faqat eng oxirgi xabarga keyboardni biriktiramiz
-                markup = self._keyboard() if i == len(chunks) - 1 else None
-                await message.answer(chunk, parse_mode="HTML", reply_markup=markup)
-
-        @self.dp.message(Command("status"))
-        @self.dp.message(F.text == BTN_STATUS)
-        async def cmd_status(message: Message):
-            if not self._authorized(message):
-                return
-            summary = await self.risk.get_status_summary()
-            text = (
-                f"🤖 <b>Bot holati</b>\n"
-                f"Ishlayapti: {'✅' if summary['bot_running'] else '🛑'}\n"
-                f"Kunlik zarar: ${summary['daily_loss_usd']:.2f} / ${summary['max_daily_loss_usd']:.2f}\n"
-                f"Ochiq pozitsiyalar: {summary['open_positions']} / {summary['max_open_positions']}"
-            )
-            await message.answer(text, parse_mode="HTML", reply_markup=self._keyboard())
-
-        @self.dp.message(Command("stats"))
-        @self.dp.message(F.text == BTN_STATS)
-        async def cmd_stats(message: Message):
-            if not self._authorized(message):
-                return
-            summary = await self.risk.get_status_summary()
-            pnl = history.pnl_summary()
-            await message.answer(
-                f"📈 <b>Statistika</b>\n"
-                f"Ishlayapti: {'✅' if summary['bot_running'] else '🛑'}\n"
-                f"Kunlik zarar: ${summary['daily_loss_usd']:.2f} / ${summary['max_daily_loss_usd']:.2f}\n"
-                f"Ochiq: {summary['open_positions']} / {summary['max_open_positions']}\n"
-                f"Savdolar: {pnl['total_trades']} | Yutuq foizi: {pnl['win_rate']}%\n"
-                f"Sof foyda/zarar: ${pnl['net_pnl']:+.2f}",
-                parse_mode="HTML",
-                reply_markup=self._keyboard(),
-            )
-
-        @self.dp.message(Command("restart"))
-        @self.dp.message(F.text == BTN_RESTART)
-        async def cmd_restart(message: Message):
-            if not self._authorized(message):
-                return
-            await self.risk.set_bot_running(False)
-            await asyncio.sleep(1)
-            await self.risk.set_bot_running(True)
-            await message.answer("🔄 Bot qayta ishga tushirildi", parse_mode="HTML", reply_markup=self._keyboard())
-
-        @self.dp.message(Command("clean"))
-        @self.dp.message(Command("tozalash"))
-        @self.dp.message(F.text == BTN_CLEAN)
-        async def cmd_clean(message: Message):
-            """Ghost pozitsiyalar, cooldown, scanner cache tozalash + on-chain sinxron."""
-            if not self._authorized(message):
-                return
-            if not self.cleaner:
-                await message.answer(
-                    "❌ Tozalash moduli ulanmagan.",
-                    reply_markup=self._keyboard(),
-                )
-                return
-            await message.answer("🧹 Tozalanmoqda… biroz kuting.")
+        if text in ("/start", "▶️ Start"):
+            await self._cmd_start()
+        elif text in ("/stop", "⏹ Stop"):
+            await self._cmd_stop()
+        elif text == "/positions":
+            await self._cmd_positions()
+        elif text == "/status":
+            await self._cmd_status()
+        elif text == "/stats":
+            await self._cmd_stats()
+        elif text in ("/wallet", "👛 Hamyon"):
+            await self._cmd_wallet()
+        elif text in ("/clean", "🧹 Tozalash"):
+            await self._cmd_clean()
+        elif text == "/clean_all":
+            await self._cmd_clean_all()
+        elif text.startswith("/set_wallet"):
+            pk = text.replace("/set_wallet", "").strip()
+            if pk:
+                try:
+                    from solders.keypair import Keypair
+                    kp = Keypair.from_base58_string(pk)
+                    settings.PRIVATE_KEY = pk
+                    # Persist to .env
+                    try:
+                        from dotenv import set_key
+                        from pathlib import Path
+                        env_file = Path(__file__).resolve().parent.parent / ".env"
+                        set_key(str(env_file), "PRIVATE_KEY", pk)
+                    except Exception:
+                        pass
+                    await self.notifier.send_message(
+                        f"✅ Hamyon ulandi!\n"
+                        f"Manzil: <code>{str(kp.pubkey())}</code>\n"
+                        f"Rejim: {'PAPER' if settings.PAPER_TRADING else 'LIVE'}",
+                        reply_markup=self._get_inline_keyboard()
+                    )
+                except Exception as e:
+                    await self.notifier.send_message(f"❌ Xato: Yaroqsiz private key ({e})", reply_markup=self._get_inline_keyboard())
+        elif text == "/clear_wallet":
+            settings.PRIVATE_KEY = ""
+            # Persist to .env
             try:
-                report = await self.cleaner.full_cleanup(
-                    reconcile=True,
-                    clear_cooldowns=True,
-                    clear_processed=True,
-                    reset_daily_loss=False,
-                    clear_history=False,
-                    clear_positions=False,
+                from dotenv import set_key
+                from pathlib import Path
+                env_file = Path(__file__).resolve().parent.parent / ".env"
+                set_key(str(env_file), "PRIVATE_KEY", "")
+            except Exception:
+                pass
+            await self.notifier.send_message("🗑 Hamyon tozalandi", reply_markup=self._get_inline_keyboard())
+        elif text == "/restart":
+            settings.BOT_RUNNING = True
+            await self.notifier.send_message("🔄 Bot qayta ishga tushirildi", reply_markup=self._get_inline_keyboard())
+        elif text in ("/buy", "/savdo", "💰 Savdo ochish"):
+            self._states[chat_id] = "awaiting_buy_token"
+            await self.notifier.send_message(
+                "💰 <b>Savdo ochish</b>\n\n"
+                "Sotib olmoqchi bo'lgan Solana token manzilini (Mint address) yuboring.\n"
+                f"Miqdor: <b>${settings.TRADE_AMOUNT_USD:.2f}</b>\n"
+                f"Rejim: <b>{'PAPER' if settings.PAPER_TRADING else 'LIVE'}</b>",
+                reply_markup=self._get_inline_keyboard()
+            )
+        elif text.startswith("/add_admin"):
+            parts = text.split(maxsplit=1)
+            if len(parts) > 1 and parts[1].strip().isdigit():
+                ok, msg = self._add_admin(parts[1].strip())
+                await self.notifier.send_message(msg, reply_markup=self._get_inline_keyboard())
+            else:
+                self._states[chat_id] = "awaiting_admin_id"
+                await self.notifier.send_message(
+                    "👤 <b>Yangi admin qo'shish</b>\n\n"
+                    "Yangi adminning Telegram chat ID sini yuboring (raqam).\n"
+                    "Masalan: <code>123456789</code>",
+                    reply_markup=self._get_inline_keyboard()
                 )
-                text = self.cleaner.format_report(report)
-                await message.answer(text, parse_mode="HTML", reply_markup=self._keyboard())
-            except Exception as e:
-                logger.exception(f"Telegram /clean xato: {e}")
-                await message.answer(
-                    f"❌ Tozalash xatosi: {html.escape(str(e))}",
-                    parse_mode="HTML",
-                    reply_markup=self._keyboard(),
-                )
+        elif text in ("/admins", "/adminlar"):
+            ids = [x.strip() for x in str(settings.TELEGRAM_CHAT_ID or "").split(",") if x.strip()]
+            await self.notifier.send_message(
+                f"👤 <b>Adminlar ro'yxati</b>\n\n"
+                f"Jami: <b>{len(ids)}</b>\n"
+                + "\n".join(f"• <code>{i}</code>" for i in ids),
+                reply_markup=self._get_inline_keyboard()
+            )
 
-        @self.dp.message(Command("clean_all"))
-        async def cmd_clean_all(message: Message):
-            """Kuchli tozalash: + kunlik zarar reset + tarix (pozitsiya yozuvlari SAQLANADI)."""
-            if not self._authorized(message):
-                return
-            if not self.cleaner:
-                await message.answer("❌ Tozalash moduli ulanmagan.", reply_markup=self._keyboard())
-                return
-            await message.answer("🧹 Kuchli tozalash…")
-            try:
-                report = await self.cleaner.full_cleanup(
-                    reconcile=True,
-                    clear_cooldowns=True,
-                    clear_processed=True,
-                    reset_daily_loss=True,
-                    clear_history=True,
-                    clear_positions=False,
-                )
-                text = self.cleaner.format_report(report)
-                await message.answer(text, parse_mode="HTML", reply_markup=self._keyboard())
-            except Exception as e:
-                logger.exception(f"Telegram /clean_all xato: {e}")
-                await message.answer(
-                    f"❌ Tozalash xatosi: {html.escape(str(e))}",
-                    parse_mode="HTML",
-                    reply_markup=self._keyboard(),
-                )
+    async def _cmd_start(self):
+        settings.BOT_RUNNING = True
+        if self.bot_ref and hasattr(self.bot_ref, "risk"):
+            await self.bot_ref.risk.set_bot_running(True)
+        await self.notifier.send_message(
+            "▶️ <b>Bot ishga tushdi!</b>\n\n"
+            f"Mode: <b>{'PAPER' if settings.PAPER_TRADING else 'LIVE'}</b>\n"
+            f"Trade: <b>${settings.TRADE_AMOUNT_USD:.1f}</b>\n"
+            f"TP: <b>{settings.TAKE_PROFIT_PCT*100:.0f}%</b> | "
+            f"SL: <b>{settings.STOP_LOSS_PCT*100:.0f}%</b>\n\n"
+            "Boshqarish uchun quyidagi tugmalardan foydalaning:",
+            reply_markup=self._get_inline_keyboard()
+        )
 
-    def _authorized(self, message: Message) -> bool:
-        if not self.chat_id:
-            return True
-        return str(message.chat.id) == str(self.chat_id)
+    async def _cmd_stop(self):
+        settings.BOT_RUNNING = False
+        if self.bot_ref and hasattr(self.bot_ref, "risk"):
+            await self.bot_ref.risk.set_bot_running(False)
+        await self.notifier.send_message("⏹ <b>Bot to'xtatildi</b>", reply_markup=self._get_inline_keyboard())
 
-    async def send_message(self, text: str, parse_mode: str = "HTML"):
-        if not self.bot or not self.chat_id:
+    async def _cmd_positions(self):
+        if not self.bot_ref or not hasattr(self.bot_ref, "risk"):
+            await self.notifier.send_message("Pozitsiyalar mavjud emas", reply_markup=self._get_inline_keyboard())
             return
+        positions = await self.bot_ref.risk.get_open_positions()
+        if not positions:
+            await self.notifier.send_message("📭 Ochiq pozitsiyalar yo'q", reply_markup=self._get_inline_keyboard())
+            return
+        lines = ["📊 <b>Ochiq pozitsiyalar:</b>\n"]
+        for tok, pos in positions.items():
+            entry = pos.get("entry_price", 0)
+            curr = pos.get("current_price", entry)
+            from utils.helpers import pnl_percent, pnl_usd as calc_pnl
+            pct = pnl_percent(entry, curr)
+            usd = calc_pnl(pos.get("amount_usd", 0), entry, curr)
+            emoji = "🟢" if pct >= 0 else "🔴"
+            lines.append(
+                f"{emoji} <b>{pos.get('symbol', tok[:8])}</b>\n"
+                f"   Miqdor: ${pos.get('amount_usd', 0):.2f}\n"
+                f"   PnL: ${usd:+.2f} ({pct:+.1f}%)\n"
+                f"   {'PAPER' if pos.get('paper') else 'LIVE'}"
+            )
+        await self.notifier.send_message("\n".join(lines), reply_markup=self._get_inline_keyboard())
+
+    async def _cmd_status(self):
+        if not self.bot_ref or not hasattr(self.bot_ref, "risk"):
+            await self.notifier.send_message("Status mavjud emas", reply_markup=self._get_inline_keyboard())
+            return
+        summary = await self.bot_ref.risk.get_status_summary()
+        pnl = history.pnl_summary()
+        await self.notifier.send_message(
+            f"📈 <b>Bot holati</b>\n\n"
+            f"▶️ Ishlamoqda: <b>{'Ha' if settings.BOT_RUNNING else 'Yoq'}</b>\n"
+            f"📦 Ochiq: <b>{summary.get('open_positions', 0)}/{settings.MAX_OPEN_POSITIONS}</b>\n"
+            f"💸 Kunlik zarar: <b>${summary.get('daily_loss_usd', 0):.2f}</b>\n"
+            f"📊 Net PnL: <b>${pnl['net_pnl']:+.2f}</b>\n"
+            f"🏆 Win rate: <b>{pnl['win_rate']}%</b>\n"
+            f"🎯 Jami savdolar: <b>{pnl['total_trades']}</b>\n"
+            f"Mode: <b>{'PAPER' if settings.PAPER_TRADING else 'LIVE'}</b>",
+            reply_markup=self._get_inline_keyboard()
+        )
+
+    async def _cmd_stats(self):
+        pnl = history.pnl_summary()
+        await self.notifier.send_message(
+            f"📊 <b>Statistika</b>\n\n"
+            f"Jami savdolar: <b>{pnl['total_trades']}</b>\n"
+            f"Net PnL: <b>${pnl['net_pnl']:+.2f}</b>\n"
+            f"Profit: <b>${pnl['profit']:.2f}</b>\n"
+            f"Zarar: <b>${pnl['loss']:.2f}</b>\n"
+            f"Win rate: <b>{pnl['win_rate']}%</b>\n"
+            f"Eng yaxshi: <b>${pnl['best']:+.2f}</b>\n"
+            f"Eng yomon: <b>${pnl['worst']:+.2f}</b>",
+            reply_markup=self._get_inline_keyboard()
+        )
+
+    async def _cmd_wallet(self):
+        from wallet.keypair import get_pubkey, get_sol_balance
+        pubkey = get_pubkey()
+        if not pubkey:
+            await self.notifier.send_message(
+                "👛 <b>Hamyon ulanmagan</b>\n\n"
+                "Paper rejimda ishlayapsiz.\n"
+                "Ulash: /set_wallet <private_key>",
+                reply_markup=self._get_inline_keyboard()
+            )
+            return
+        sol_bal = 0.0
+        if self._session:
+            sol_bal = await get_sol_balance(self._session, pubkey)
+        await self.notifier.send_message(
+            f"👛 <b>Hamyon</b>\n\n"
+            f"Manzil: <code>{pubkey}</code>\n"
+            f"SOL balans: <b>{sol_bal:.4f} SOL</b>\n"
+            f"Mode: <b>{'PAPER' if settings.PAPER_TRADING else 'LIVE'}</b>",
+            reply_markup=self._get_inline_keyboard()
+        )
+
+    async def _cmd_clean(self):
+        if self.bot_ref and hasattr(self.bot_ref, "risk"):
+            self.bot_ref.risk.clear_cooldowns()
+            self.bot_ref.risk.clear_processed()
+        await self.notifier.send_message("🧹 Tozalash amalga oshirildi", reply_markup=self._get_inline_keyboard())
+
+    async def _cmd_clean_all(self):
+        if self.bot_ref and hasattr(self.bot_ref, "risk"):
+            self.bot_ref.risk.clear_cooldowns()
+            self.bot_ref.risk.clear_processed()
+            await self.bot_ref.risk.reset_daily_loss()
+            if hasattr(self.bot_ref, "advanced_risk"):
+                self.bot_ref.advanced_risk.daily_trades = 0
+                self.bot_ref.advanced_risk.consecutive_losses = 0
+        history.clear_trades()
+        await self.notifier.send_message("🧹 Kuchli tozalash bajarildi (tarix, kunlik zarar va cooldown nollashdi)", reply_markup=self._get_inline_keyboard())
+
+    async def _check_token_info(self, token_address: str) -> str:
+        if not self.bot_ref:
+            return "❌ Xato: Bot bog'lanmagan."
+            
+        url = f"https://api.dexscreener.com/latest/dex/tokens/{token_address}"
         try:
-            await self.bot.send_message(chat_id=self.chat_id, text=text, parse_mode=parse_mode)
+            async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status != 200:
+                    return f"❌ DexScreener ma'lumot topa olmadi (Status: {r.status})."
+                data = await r.json()
+                pairs = data.get("pairs") or []
+                if not pairs:
+                    return "❌ Token uchun hech qanday savdo juftligi topilmadi."
+                
+                from scanner.dexscreener import _normalize_pair
+                from config.settings import settings
+                
+                best_pair_raw = sorted(
+                    [p for p in pairs if p.get("chainId") == "solana"],
+                    key=lambda p: safe_float((p.get("liquidity") or {}).get("usd")),
+                    reverse=True
+                )
+                if not best_pair_raw:
+                    return "❌ Faqat Solana tarmog'idagi juftliklar qo'llab-quvvatlanadi."
+                
+                pair = _normalize_pair(best_pair_raw[0])
+                
+                pipeline = self.bot_ref.filter_pipeline
+                passed, reason, enriched = await pipeline.run(pair, self._session)
+                
+                scorer = self.bot_ref.scorer
+                ai_result = scorer.score(enriched)
+                
+                lines = [
+                    f"🔍 <b>TOKEN TAHLILI: {enriched.get('symbol', '?')}</b>\n",
+                    f"📝 Nomi: <b>{enriched.get('name', '?')}</b>",
+                    f"🔑 Address: <code>{token_address}</code>\n",
+                    f"💵 Narxi: <b>${enriched.get('price_usd', 0):.10f}</b>",
+                    f"💧 Liquidity: <b>${enriched.get('liquidity_usd', 0):,.0f}</b>",
+                    f"📊 Vol 5m: <b>${enriched.get('volume_5m', 0):,.0f}</b>",
+                    f"📈 Market Cap: <b>${enriched.get('market_cap', 0):,.0f}</b>",
+                    f"⏳ Yoshi: <b>{enriched.get('token_age_minutes', 0):.1f} daqiqa</b>\n",
+                    f"🛡 Filtrlar: <b>{'Oʻtdi ✅' if passed else 'Oʻtmadi ❌'}</b>",
+                    f"💬 Sabab: <b>{reason or 'Muammosiz'}</b>\n",
+                    f"🤖 AI ball: <b>{ai_result.score:.1f} / 100</b>",
+                    f"📢 Tavsiya: <b>{ai_result.recommendation.value}</b>"
+                ]
+                
+                if ai_result.signals:
+                    lines.append("\n🟢 <b>AI Signallar:</b>")
+                    for sig in ai_result.signals[:3]:
+                        lines.append(f"• {sig}")
+                if ai_result.warnings:
+                    lines.append("\n⚠️ <b>AI Ogohlantirishlar:</b>")
+                    for warn in ai_result.warnings[:3]:
+                        lines.append(f"• {warn}")
+                        
+                return "\n".join(lines)
+                
         except Exception as e:
-            logger.error(f"Telegram xabar yuborish xato: {e}")
+            return f"❌ Tahlil jarayonida xatolik yuz berdi: {e}"
 
-    async def notify_trade_open(self, symbol: str, token: str, amount_usd: float, price: float, tx: str = ""):
-        text = (
-            f"🟢 <b>XARID</b>\n"
-            f"Token: <code>{html.escape(symbol)}</code>\n"
-            f"Manzil: <code>{html.escape(token)}</code>\n"
-            f"Miqdor: ${amount_usd:.2f}\n"
-            f"Narx: ${price:.8f}\n"
-        )
-        if tx:
-            text += f"Tranzaksiya: <code>{html.escape(tx[:20])}...</code>"
-        await self.send_message(text)
 
-    async def notify_trade_close(
-        self,
-        symbol: str,
-        token: str,
-        pnl_usd: float,
-        pnl_pct: float,
-        reason: str,
-        tx: str = "",
-    ):
-        emoji = "🟢" if pnl_usd >= 0 else "🔴"
-        text = (
-            f"{emoji} <b>SOTISH</b> ({html.escape(reason)})\n"
-            f"Token: <code>{html.escape(symbol)}</code>\n"
-            f"Foyda/zarar: ${pnl_usd:+.2f} ({pnl_pct:+.1f}%)\n"
+    def _add_admin(self, new_chat_id: str) -> tuple:
+        """Yangi admin (chat_id) qo'shish va .env ga yozish."""
+        current = str(settings.TELEGRAM_CHAT_ID or "").strip()
+        ids = [x.strip() for x in current.split(",") if x.strip()]
+        if new_chat_id in ids:
+            return False, f"ℹ️ Bu chat ID allaqachon admin: <code>{new_chat_id}</code>"
+        ids.append(new_chat_id)
+        new_value = ",".join(ids)
+        settings.TELEGRAM_CHAT_ID = new_value
+        try:
+            from dotenv import set_key
+            from pathlib import Path
+            env_file = Path(__file__).resolve().parent.parent / ".env"
+            set_key(str(env_file), "TELEGRAM_CHAT_ID", new_value)
+        except Exception as e:
+            return False, f"❌ .env ga yozishda xato: {e}"
+        return True, (
+            f"✅ Yangi admin qo'shildi!\n\n"
+            f"Chat ID: <code>{new_chat_id}</code>\n"
+            f"Jami adminlar: <b>{len(ids)}</b>\n"
+            f"Ro'yxat: <code>{new_value}</code>"
         )
-        if tx:
-            text += f"Tranzaksiya: <code>{html.escape(tx[:20])}...</code>"
-        await self.send_message(text)
 
-    async def notify_daily_limit(self):
-        await self.send_message(
-            f"🛑 <b>Kunlik zarar limiti yetdi</b> (${settings.MAX_DAILY_LOSS_USD})\nBot avtomatik to'xtatildi."
-        )
+    async def _open_manual_trade(self, token_address: str) -> str:
+        """Token manzili bo'yicha qo'lda savdo ochish (sotib olish)."""
+        if not self.bot_ref:
+            return "❌ Xato: Bot bog'lanmagan."
+
+        if not settings.BOT_RUNNING:
+            return "❌ Bot to'xtatilgan. Avval ▶️ Start bosing."
+
+        # DexScreener dan ma'lumot
+        url = f"https://api.dexscreener.com/latest/dex/tokens/{token_address}"
+        try:
+            async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as r:
+                if r.status != 200:
+                    return f"❌ DexScreener ma'lumot topa olmadi (Status: {r.status})."
+                data = await r.json()
+                pairs = data.get("pairs") or []
+                if not pairs:
+                    return "❌ Token uchun savdo juftligi topilmadi."
+
+                from scanner.dexscreener import _normalize_pair
+                from buy.executor import execute_buy
+                from utils.helpers import safe_float
+
+                solana_pairs = [p for p in pairs if p.get("chainId") == "solana"]
+                if not solana_pairs:
+                    return "❌ Faqat Solana tarmog'idagi tokenlar qo'llab-quvvatlanadi."
+
+                best = sorted(
+                    solana_pairs,
+                    key=lambda p: safe_float((p.get("liquidity") or {}).get("usd")),
+                    reverse=True
+                )[0]
+                pair = _normalize_pair(best)
+                symbol = pair.get("symbol") or token_address[:8]
+                price = safe_float(pair.get("price_usd"))
+                if price <= 0:
+                    return "❌ Token narxi 0 yoki topilmadi."
+
+                # Risk pre-check
+                amount = settings.TRADE_AMOUNT_USD
+                ok, reason = await self.bot_ref.risk.pre_trade_check(token_address, amount)
+                if not ok:
+                    return f"❌ Savdo ochilmadi: {reason}"
+
+                # Sotib olish
+                success, position = await execute_buy(
+                    token=token_address,
+                    symbol=symbol,
+                    amount_usd=amount,
+                    current_price=price,
+                    session=self._session,
+                    paper=settings.PAPER_TRADING,
+                )
+                if not success:
+                    err = position.get("error", "Noma'lum xato")
+                    return f"❌ Xarid muvaffaqiyatsiz: {err}"
+
+                position["ai_score"] = 0
+                position["manual"] = True
+                position["high_price"] = price
+
+                opened = await self.bot_ref.risk.open_position(token_address, position)
+                if not opened:
+                    return "❌ Pozitsiya ochilmadi (allaqachon mavjud bo'lishi mumkin)."
+
+                if hasattr(self.bot_ref, "advanced_risk"):
+                    self.bot_ref.advanced_risk.daily_trades += 1
+
+                mode = "PAPER" if settings.PAPER_TRADING else "LIVE"
+                liq = safe_float(pair.get("liquidity_usd"))
+                return (
+                    f"🟢 <b>SAVDO OCHILDI: {symbol}</b>\n\n"
+                    f"🔑 Address: <code>{token_address}</code>\n"
+                    f"💰 Miqdor: <b>${amount:.2f}</b>\n"
+                    f"📈 Narx: <b>${price:.10f}</b>\n"
+                    f"💧 Liquidity: <b>${liq:,.0f}</b>\n"
+                    f"📦 Token miqdori: <b>{position.get('tokens_amount', 0):.4f}</b>\n"
+                    f"Rejim: <b>{mode}</b>\n\n"
+                    f"✅ Pozitsiya ochiq. Monitor TP/SL ishlaydi."
+                )
+        except Exception as e:
+            return f"❌ Savdo ochishda xatolik: {e}"

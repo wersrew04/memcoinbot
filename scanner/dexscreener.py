@@ -1,107 +1,71 @@
-"""DexScreener scanner – yangi juftliklar va token ma'lumotlari."""
+"""DexScreener API — yangi Solana juftliklarini skanerlash."""
 from __future__ import annotations
-
-import httpx
-from typing import Any, Dict, List, Optional
+import aiohttp
+from typing import Any, Dict, List
 from utils.logger import logger
-from utils.retry import async_retry
-from utils.helpers import safe_float, safe_int
-from config.constants import (
-    DEXSCREENER_TOKEN_PROFILES,
-    DEXSCREENER_SEARCH,
-    DEXSCREENER_PAIRS,
-    DEXSCREENER_TOKEN_PAIRS,
-)
+from utils.helpers import utc_now, safe_float
+
+DEXSCREENER_URL = "https://api.dexscreener.com/latest/dex/pairs/solana"
+NEW_PAIRS_URL = "https://api.dexscreener.com/latest/dex/search?q=solana"
 
 
-class DexScreenerClient:
-    def __init__(self, timeout: float = 20.0):
-        self.timeout = timeout
-        self.headers = {"Accept": "application/json", "User-Agent": "MemeBot/1.0"}
-
-    @async_retry(max_attempts=3)
-    async def get_latest_token_profiles(self) -> List[Dict[str, Any]]:
-        """Eng so'nggi token profile'lar (yangi launchlar uchun foydali)."""
-        async with httpx.AsyncClient(timeout=self.timeout, headers=self.headers) as client:
-            resp = await client.get(DEXSCREENER_TOKEN_PROFILES)
-            resp.raise_for_status()
-            data = resp.json()
-            if isinstance(data, list):
-                return data
-            return []
-
-    @async_retry(max_attempts=3)
-    async def search_pairs(self, query: str = "solana") -> List[Dict[str, Any]]:
-        """Qidiruv orqali juftliklar."""
-        async with httpx.AsyncClient(timeout=self.timeout, headers=self.headers) as client:
-            resp = await client.get(DEXSCREENER_SEARCH, params={"q": query})
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("pairs") or []
-
-    @async_retry(max_attempts=3)
-    async def get_pair(self, pair_address: str) -> Optional[Dict[str, Any]]:
-        """Bitta juftlik ma'lumoti."""
-        url = f"{DEXSCREENER_PAIRS}/{pair_address}"
-        async with httpx.AsyncClient(timeout=self.timeout, headers=self.headers) as client:
-            resp = await client.get(url)
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-            data = resp.json()
+async def fetch_new_pairs(session: aiohttp.ClientSession, min_liquidity: float = 10000) -> List[Dict]:
+    """DexScreener dan yangi tokenlarni olish."""
+    results = []
+    try:
+        async with session.get(
+            "https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112",
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as resp:
+            if resp.status != 200:
+                return results
+            data = await resp.json()
             pairs = data.get("pairs") or []
-            return pairs[0] if pairs else None
+            for pair in pairs:
+                if pair.get("chainId") != "solana":
+                    continue
+                liq = safe_float(pair.get("liquidity", {}).get("usd"))
+                if liq < min_liquidity:
+                    continue
+                results.append(_normalize_pair(pair))
+    except Exception as e:
+        logger.warning(f"DexScreener xato: {e}")
+    return results
 
-    @async_retry(max_attempts=3)
-    async def get_token_pairs(self, token_address: str) -> List[Dict[str, Any]]:
-        """Token bo'yicha barcha juftliklar."""
-        url = f"{DEXSCREENER_TOKEN_PAIRS}/{token_address}"
-        async with httpx.AsyncClient(timeout=self.timeout, headers=self.headers) as client:
-            resp = await client.get(url)
-            if resp.status_code == 404:
-                return []
-            resp.raise_for_status()
-            data = resp.json()
-            if isinstance(data, list):
-                return data
-            return data.get("pairs") or []
 
-    def normalize_pair(self, pair: Dict[str, Any]) -> Dict[str, Any]:
-        """Juftlikni standart formatga keltirish."""
-        base = pair.get("baseToken") or {}
-        quote = pair.get("quoteToken") or {}
-        liquidity = pair.get("liquidity") or {}
-        volume = pair.get("volume") or {}
-        txns = pair.get("txns") or {}
-        price_change = pair.get("priceChange") or {}
+def _normalize_pair(pair: Dict) -> Dict:
+    from datetime import datetime, timezone
+    created_at = pair.get("pairCreatedAt", 0)
+    age_minutes = 0.0
+    if created_at:
+        try:
+            created_dt = datetime.fromtimestamp(created_at / 1000, tz=timezone.utc)
+            age_minutes = (utc_now() - created_dt).total_seconds() / 60
+        except Exception:
+            pass
+    pc = pair.get("priceChange") or {}
+    vol = pair.get("volume") or {}
+    txns = pair.get("txns", {}).get("h1") or {}
+    buys = safe_float(txns.get("buys"))
+    sells = safe_float(txns.get("sells")) or 1
 
-        return {
-            "pair_address": pair.get("pairAddress"),
-            "dex_id": pair.get("dexId"),
-            "url": pair.get("url"),
-            "token_address": base.get("address"),
-            "token_name": base.get("name"),
-            "token_symbol": base.get("symbol"),
-            "quote_address": quote.get("address"),
-            "quote_symbol": quote.get("symbol"),
-            "price_usd": safe_float(pair.get("priceUsd")),
-            "price_native": safe_float(pair.get("priceNative")),
-            "liquidity_usd": safe_float(liquidity.get("usd")),
-            "volume_5m": safe_float(volume.get("m5")),
-            "volume_1h": safe_float(volume.get("h1")),
-            "volume_6h": safe_float(volume.get("h6")),
-            "volume_24h": safe_float(volume.get("h24")),
-            "price_change_5m": safe_float(price_change.get("m5")),
-            "price_change_1h": safe_float(price_change.get("h1")),
-            "price_change_6h": safe_float(price_change.get("h6")),
-            "price_change_24h": safe_float(price_change.get("h24")),
-            "txns_5m_buys": safe_int((txns.get("m5") or {}).get("buys")),
-            "txns_5m_sells": safe_int((txns.get("m5") or {}).get("sells")),
-            "txns_1h_buys": safe_int((txns.get("h1") or {}).get("buys")),
-            "txns_1h_sells": safe_int((txns.get("h1") or {}).get("sells")),
-            "fdv": safe_float(pair.get("fdv")),
-            "market_cap": safe_float(pair.get("marketCap")),
-            "pair_created_at": pair.get("pairCreatedAt"),
-            "labels": pair.get("labels") or [],
-            "raw": pair,
-        }
+    return {
+        "token": (pair.get("baseToken") or {}).get("address", ""),
+        "symbol": (pair.get("baseToken") or {}).get("symbol", "?"),
+        "name": (pair.get("baseToken") or {}).get("name", ""),
+        "pair_address": pair.get("pairAddress", ""),
+        "price_usd": safe_float(pair.get("priceUsd")),
+        "liquidity_usd": safe_float((pair.get("liquidity") or {}).get("usd")),
+        "volume_5m": safe_float(vol.get("m5")),
+        "volume_1h": safe_float(vol.get("h1")),
+        "volume_24h": safe_float(vol.get("h24")),
+        "price_change_5m": safe_float(pc.get("m5")),
+        "price_change_1h": safe_float(pc.get("h1")),
+        "market_cap": safe_float(pair.get("marketCap")),
+        "fdv": safe_float(pair.get("fdv")),
+        "buy_sell_ratio": buys / sells if sells > 0 else 1.0,
+        "token_age_minutes": age_minutes,
+        "dex_id": pair.get("dexId", ""),
+        "url": pair.get("url", ""),
+        "source": "dexscreener",
+    }

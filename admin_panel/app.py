@@ -295,8 +295,10 @@ async def _dashboard_html(bot_ref) -> str:
             current = pos.get("current_price")
             if current is not None:
                 current_val = float(current)
-                pnl_pct = ((current_val / entry) - 1.0) * 100.0 if entry > 0 else 0.0
-                pnl_usd = float(pos.get("amount_usd") or 0) * (current_val / entry - 1.0) if entry > 0 else 0.0
+                from utils.helpers import pnl_percent, pnl_usd as calc_pnl_usd
+                amount = float(pos.get("amount_usd") or 0)
+                pnl_pct = pnl_percent(entry, current_val)
+                pnl_usd = calc_pnl_usd(amount, entry, current_val)
                 pnl_class = "pnl-pos" if pnl_pct >= 0 else "pnl-neg"
                 pnl_text = f"${pnl_usd:+.2f} ({pnl_pct:+.1f}%)"
                 current_text = f"${current_val:.8f}"

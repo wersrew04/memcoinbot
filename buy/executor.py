@@ -1,163 +1,164 @@
-"""Buy executor – filterdan o'tgan tokenni xarid qilish."""
+"""
+Xarid executor.
+
+Paper rejim  : haqiqiy tranzaksiya yo'q, faqat simulyatsiya.
+Live rejim   : Jupiter V6 → sign → RPC → confirm.
+"""
 from __future__ import annotations
-
-from typing import Any, Dict, Optional
+import asyncio
+import aiohttp
+from typing import Dict, Tuple
 from utils.logger import logger
-from utils.helpers import utc_now, safe_float, safe_int
+from utils.helpers import safe_float, utc_now
 from config.settings import settings
-from risk.manager import RiskManager
-from buy.jupiter import JupiterSwap
-from wallet.keypair import load_keypair
-from wallet.rpc import SolanaRPC
+
+SOL_MIN_RESERVE = 0.05   # Gaz uchun doim saqlab qolish kerak bo'lgan SOL
 
 
-class BuyExecutor:
-    def __init__(
-        self,
-        risk: RiskManager,
-        jupiter: Optional[JupiterSwap] = None,
-        rpc: Optional[SolanaRPC] = None,
-        telegram=None,
-        advanced_risk=None,
-        mev=None,
-        portfolio=None,
-        notifications=None,
-    ):
-        self.risk = risk
-        self.rpc = rpc or SolanaRPC()
-        self.jupiter = jupiter or JupiterSwap(self.rpc)
-        self.telegram = telegram
-        self.advanced_risk = advanced_risk
-        self.mev = mev
-        self.portfolio = portfolio
-        self.notifications = notifications
-        self.keypair = load_keypair()
+async def execute_buy(
+    token: str,
+    symbol: str,
+    amount_usd: float,
+    current_price: float,
+    session: aiohttp.ClientSession,
+    paper: bool = True,
+) -> Tuple[bool, Dict]:
+    """
+    Returns: (success, position_data)
+    """
+    if paper or settings.PAPER_TRADING:
+        return await _paper_buy(token, symbol, amount_usd, current_price)
+    return await _live_buy(token, symbol, amount_usd, current_price, session)
 
-    async def try_buy(self, token_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """
-        Risk check + MEV + portfolio + buy. Muvaffaqiyatli bo'lsa position qaytaradi.
-        """
-        token = token_data.get("token_address") or token_data.get("address")
-        if not token:
-            return None
 
-        symbol = (
-            token_data.get("token_symbol")
-            or (token_data.get("birdeye_overview") or {}).get("symbol")
-            or token[:8]
+# ─────────────────── PAPER ───────────────────
+
+async def _paper_buy(
+    token: str, symbol: str, amount_usd: float, price: float
+) -> Tuple[bool, Dict]:
+    if price <= 0:
+        return False, {"error": "Narx 0"}
+
+    position = {
+        "token": token,
+        "symbol": symbol,
+        "amount_usd": amount_usd,
+        "tokens_amount": amount_usd / price,
+        "entry_price": price,
+        "current_price": price,
+        "high_price": price,
+        "paper": True,
+        "tx_hash": "PAPER_{}".format(utc_now().strftime("%H%M%S%f")[:12]),
+    }
+    logger.info("[PAPER BUY] {} ${:.2f} @ ${:.10f}".format(symbol, amount_usd, price))
+    return True, position
+
+
+# ─────────────────── LIVE ────────────────────
+
+async def _live_buy(
+    token: str, symbol: str, amount_usd: float,
+    price: float, session: aiohttp.ClientSession
+) -> Tuple[bool, Dict]:
+    from wallet.keypair import get_keypair, get_sol_balance, get_sol_price_usd
+    from buy.jupiter import get_quote, get_swap_transaction, sign_and_send, confirm_transaction
+
+    keypair = get_keypair()
+    if not keypair:
+        logger.error("Private key topilmadi — live xarid imkonsiz")
+        return False, {"error": "Private key yo'q"}
+
+    pubkey = str(keypair.pubkey())
+
+    # SOL balansini tekshirish
+    sol_balance = await get_sol_balance(session, pubkey)
+    sol_price = await get_sol_price_usd(session)
+    if sol_price <= 0:
+        sol_price = 150.0  # fallback to avoid division by zero
+
+    sol_needed = (amount_usd / sol_price) + SOL_MIN_RESERVE
+    if sol_balance < sol_needed:
+        msg = "Yetarli SOL yo'q: {:.4f} SOL bor, {:.4f} kerak".format(
+            sol_balance, sol_needed
         )
-        amount_usd = min(settings.TRADE_AMOUNT_USD, settings.MAX_RISK_PER_TOKEN_USD)
+        logger.warning("[LIVE BUY] {}".format(msg))
+        return False, {"error": msg}
 
-        # Advanced risk (falls back to base)
-        if self.advanced_risk:
-            ok, reason = await self.advanced_risk.pre_trade_check(token, amount_usd)
-        else:
-            ok, reason = await self.risk.pre_trade_check(token, amount_usd)
-        if not ok:
-            logger.info(f"Buy skip {symbol}: {reason}")
-            return None
+    # SOL miqdorini lamports ga aylantirish
+    sol_amount = amount_usd / sol_price
+    lamports = int(sol_amount * 1_000_000_000)
 
-        if self.portfolio:
-            ok_p, reason_p = await self.portfolio.can_allocate(amount_usd)
-            if not ok_p:
-                logger.info(f"Buy skip {symbol}: {reason_p}")
-                return None
+    logger.info("[LIVE BUY] {} — ${:.2f} ({:.6f} SOL = {} lamports)".format(
+        symbol, amount_usd, sol_amount, lamports
+    ))
 
-        # MEV protection
-        if self.mev:
-            liq = safe_float(token_data.get("liquidity_usd"))
-            vol5 = safe_float(token_data.get("volume_5m"))
-            safe, mev_reason, meta = self.mev.assess_risk(
-                token, liquidity_usd=liq, volume_5m=vol5
-            )
-            if not safe:
-                logger.warning(f"Buy skip {symbol}: {mev_reason}")
-                return None
+    # Jupiter quote
+    slippage = settings.SLIPPAGE_BPS
+    quote = await get_quote(
+        session,
+        input_mint="So11111111111111111111111111111111111111112",
+        output_mint=token,
+        amount_lamports=lamports,
+        slippage_bps=slippage,
+    )
+    if not quote:
+        return False, {"error": "Jupiter quote xato"}
 
-        kp = load_keypair()
-        if not kp and not settings.PAPER_TRADING:
-            logger.error("Keypair yo'q – real buy mumkin emas")
-            return None
+    out_amount = int(quote.get("outAmount") or 0)
+    price_impact = safe_float(quote.get("priceImpactPct"))
+    if price_impact > 5.0:
+        logger.warning("[LIVE BUY] Price impact juda baland: {:.2f}%".format(price_impact))
+        return False, {"error": "Price impact {:.1f}% > 5%".format(price_impact)}
 
-        # Decimals
-        decimals = safe_int(
-            (token_data.get("birdeye_overview") or {}).get("decimals")
-            or token_data.get("decimals")
-            or 6
-        )
-        sol_price = await self.jupiter.get_sol_price_usd()
+    # Swap tranzaksiyasini yaratish
+    swap_tx = await get_swap_transaction(
+        session, quote, pubkey,
+        priority_fee=settings.PRIORITY_FEE_MICROLAMPORTS,
+    )
+    if not swap_tx:
+        return False, {"error": "Swap tranzaksiya yaratilmadi"}
 
-        # Paper uchun dummy keypair
-        if settings.PAPER_TRADING and kp is None:
-            from solders.keypair import Keypair
-            kp = Keypair()  # ephemeral for paper
+    # MEV himoya: dinamik slippage
+    if settings.MEV_PROTECTION_ENABLED and settings.MEV_DYNAMIC_SLIPPAGE:
+        slippage = min(slippage + 50, settings.MEV_MAX_SLIPPAGE_BPS)
 
-        success, result = await self.jupiter.buy_token(
-            token_mint=token,
-            amount_usd=amount_usd,
-            keypair=kp,
-            sol_price_usd=sol_price,
-            token_decimals=decimals,
-        )
-        if not success:
-            logger.warning(f"Buy failed {symbol}: {result.get('error')}")
-            return None
+    # Imzolash va yuborish
+    sig = await sign_and_send(session, swap_tx, keypair, max_retries=settings.MEV_RETRY_ATTEMPTS)
+    if not sig:
+        return False, {"error": "Tranzaksiya yuborilmadi"}
 
-        entry_price = safe_float(result.get("entry_price"))
-        tokens = safe_float(result.get("tokens_received"))
-        # agar quote dan price_usd bo'lsa
-        if entry_price <= 0:
-            entry_price = safe_float(token_data.get("price_usd"))
+    # Tasdiqlash
+    confirmed = await confirm_transaction(session, sig, timeout_sec=60)
+    if not confirmed:
+        logger.warning("[LIVE BUY] TX tasdiqlanmadi: {}".format(sig[:20]))
+        # TX yuborilgan, lekin tasdiq yo'q — konservativ: xato qaytaramiz
+        return False, {"error": "TX tasdiqlanmadi: {}".format(sig)}
 
-        position = {
-            "token": token,
-            "symbol": symbol,
-            "entry_price": entry_price,
-            "amount_usd": amount_usd,
-            "tokens": tokens,
-            "tokens_raw": int(tokens * (10 ** decimals)) if tokens else 0,
-            "decimals": decimals,
-            "entry_tx": result.get("tx"),
-            "entry_time": utc_now().isoformat(),
-            "highest_price": entry_price,
-            "stop_loss": entry_price * (1 - settings.STOP_LOSS_PCT),
-            "take_profit": entry_price * (1 + settings.TAKE_PROFIT_PCT),
-            "trailing_stop_pct": settings.TRAILING_STOP_PCT,
-            "source": token_data.get("source"),
-            "paper": settings.PAPER_TRADING,
-            # AI learning uchun saqlanadi
-            "ai_score": safe_float(token_data.get("ai_score")),
-            "ai_factors": token_data.get("ai_factors") or {},
-            "ai_recommendation": token_data.get("ai_recommendation"),
-        }
+    # Haqiqiy token miqdori (out_amount = raw, decimals dan bo'linadi)
+    tokens_received = out_amount  # Monitor narxni hisoblaydi
 
-        await self.risk.add_position(token, position)
+    # Haqiqiy kirish narxini hisoblash
+    actual_price = price
+    if out_amount > 0:
+        try:
+            # Taxminiy narx: lamports / out_amount
+            decimals = int(quote.get("outputDecimals") or 6)
+            actual_price = (lamports / 1_000_000_000) * sol_price / (out_amount / (10 ** decimals))
+        except Exception:
+            pass
 
-        # Kunlik savdo hisoblagichi (ochilishda ham)
-        if self.advanced_risk:
-            self.advanced_risk._reset_daily_if_needed()
-            self.advanced_risk.daily_trades += 1
-
-        ai_score = safe_float(token_data.get("ai_score"))
-        logger.info(
-            f"✅ Position ochildi: {symbol} @ ${entry_price:.8f} | ${amount_usd} | "
-            f"AI={ai_score:.1f} | {'PAPER' if settings.PAPER_TRADING else 'LIVE'}"
-        )
-
-        if self.telegram:
-            await self.telegram.notify_trade_open(
-                symbol=symbol,
-                token=token,
-                amount_usd=amount_usd,
-                price=entry_price,
-                tx=result.get("tx") or "",
-            )
-        if self.notifications:
-            await self.notifications.notify_buy(
-                symbol=symbol,
-                token=token,
-                amount=amount_usd,
-                score=ai_score,
-                tx=result.get("tx") or "",
-            )
-        return position
+    position = {
+        "token": token,
+        "symbol": symbol,
+        "amount_usd": amount_usd,
+        "tokens_amount": out_amount,
+        "entry_price": actual_price,
+        "current_price": actual_price,
+        "high_price": actual_price,
+        "paper": False,
+        "tx_hash": sig,
+        "sol_spent": sol_amount,
+        "price_impact": price_impact,
+    }
+    logger.info("[LIVE BUY OK] {} tx={}".format(symbol, sig[:20] + "..."))
+    return True, position
