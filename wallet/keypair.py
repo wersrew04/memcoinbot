@@ -102,6 +102,63 @@ async def get_token_balance(
         return 0.0, 0
 
 
+TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+
+async def get_all_token_holdings(
+    session: aiohttp.ClientSession,
+    owner: str = ""
+) -> list:
+    """
+    Hamyondagi BARCHA SPL tokenlarni (mint + miqdor) qaytaradi.
+    Restart'dan keyin RAM'dagi pozitsiyalar yo'qolgan/eskirgan bo'lsa,
+    haqiqiy on-chain holatni tekshirish uchun ishlatiladi.
+    Returns: [{"mint": str, "ui_amount": float, "raw_amount": int}, ...]
+    """
+    if not owner:
+        owner = get_pubkey()
+    if not owner:
+        return []
+
+    payload = {
+        "jsonrpc": "2.0", "id": 1,
+        "method": "getTokenAccountsByOwner",
+        "params": [
+            owner,
+            {"programId": TOKEN_PROGRAM_ID},
+            {"encoding": "jsonParsed", "commitment": "confirmed"}
+        ]
+    }
+    try:
+        async with session.post(
+            settings.RPC_URL, json=payload,
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as r:
+            if r.status != 200:
+                return []
+            data = await r.json()
+            accounts = data.get("result", {}).get("value", [])
+            holdings = []
+            for acc in accounts:
+                try:
+                    info = acc["account"]["data"]["parsed"]["info"]
+                    amount_info = info["tokenAmount"]
+                    ui_amount = float(amount_info.get("uiAmount") or 0)
+                    if ui_amount <= 0:
+                        continue
+                    holdings.append({
+                        "mint": info.get("mint", ""),
+                        "ui_amount": ui_amount,
+                        "raw_amount": int(amount_info.get("amount") or 0),
+                    })
+                except Exception:
+                    continue
+            return holdings
+    except Exception as e:
+        logger.warning("Token holdings ro'yxatini olishda xato: {}".format(e))
+        return []
+
+
 async def get_sol_price_usd(session: aiohttp.ClientSession) -> float:
     """SOL/USD narxini olish."""
     try:
