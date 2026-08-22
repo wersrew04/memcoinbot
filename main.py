@@ -71,6 +71,25 @@ class MemeBot:
 
         settings.BOT_RUNNING = True
 
+        # Diskdan tiklangan pozitsiyalar bo'lsa — darhol joriy narxni yangilaymiz,
+        # shunda web panel va /positions to'g'ri ko'rsatadi, monitor esa
+        # TP/SL/trailing ni davom ettiradi.
+        restored = await self.risk.get_open_positions()
+        restored_info = ""
+        if restored:
+            async def _refresh(tok):
+                try:
+                    price = await self.monitor.get_current_price(tok)
+                    if price > 0:
+                        await self.risk.update_position(tok, {"current_price": price})
+                except Exception:
+                    pass
+            await asyncio.gather(*(_refresh(t) for t in restored.keys()))
+            names = ", ".join(p.get("symbol", t[:8]) for t, p in restored.items())
+            restored_info = "\n\n♻️ <b>Tiklangan pozitsiyalar ({}):</b> {}".format(
+                len(restored), names
+            )
+
         # Hamyon ma'lumotlari
         wallet_info = ""
         if not settings.PAPER_TRADING and settings.PRIVATE_KEY:
@@ -89,7 +108,8 @@ class MemeBot:
             "TP: <b>{:.0f}%</b> | SL: <b>{:.0f}%</b> | Trail: <b>{:.0f}%</b>\n"
             "AI min: <b>{:.0f}</b>\n\n"
             "Buyruqlar:\n"
-            "/start /stop /positions /status /stats /wallet".format(
+            "/start /stop /positions /status /stats /wallet /sync_wallet"
+            "{}".format(
                 "PAPER" if settings.PAPER_TRADING else "⚠️ LIVE",
                 wallet_info,
                 settings.TRADE_AMOUNT_USD,
@@ -97,6 +117,7 @@ class MemeBot:
                 settings.STOP_LOSS_PCT * 100,
                 settings.TRAILING_STOP_PCT * 100,
                 settings.AI_MIN_SCORE,
+                restored_info,
             )
         )
 
