@@ -239,6 +239,8 @@ class TelegramBot:
             await self._cmd_stats()
         elif text in ("/wallet", "👛 Hamyon"):
             await self._cmd_wallet()
+        elif text == "/sync_wallet":
+            await self._cmd_sync_wallet()
         elif text in ("/clean", "🧹 Tozalash"):
             await self._cmd_clean()
         elif text == "/clean_all":
@@ -407,6 +409,64 @@ class TelegramBot:
             f"SOL balans: <b>{sol_bal:.4f} SOL</b>\n"
             f"Mode: <b>{'PAPER' if settings.PAPER_TRADING else 'LIVE'}</b>",
             reply_markup=self._get_inline_keyboard()
+        )
+
+    async def _cmd_sync_wallet(self):
+        """
+        Wallet'dagi haqiqiy tokenlarni bot kuzatayotgan pozitsiyalar bilan
+        solishtiradi. Nomuvofiqlik topilsa (masalan, restart tufayli
+        kuzatuvdan tushib qolgan pozitsiya) — ogohlantiradi, chunki entry
+        narxi/TP/SL parametrlarini avtomatik tiklab bo'lmaydi (bot ularni
+        bilmaydi), shuning uchun buni qo'lda hal qilish tavsiya etiladi.
+        """
+        if settings.PAPER_TRADING:
+            await self.notifier.send_message(
+                "ℹ️ PAPER rejimda wallet sinxronizatsiyasi kerak emas.",
+                reply_markup=self._get_inline_keyboard()
+            )
+            return
+        if not self.bot_ref or not hasattr(self.bot_ref, "risk"):
+            return
+
+        from wallet.keypair import get_pubkey, get_all_token_holdings
+        pubkey = get_pubkey()
+        if not pubkey:
+            await self.notifier.send_message("⚠️ Private key sozlanmagan.")
+            return
+
+        await self.notifier.send_message("🔄 Wallet tekshirilmoqda...")
+        holdings = await get_all_token_holdings(self._session, pubkey)
+        tracked = await self.bot_ref.risk.get_open_positions()
+        tracked_mints = set(tracked.keys())
+
+        # Wallet'da bor, lekin bot kuzatmayotgan tokenlar
+        untracked = [h for h in holdings if h["mint"] not in tracked_mints]
+        # Bot kuzatayotgan, lekin wallet'da endi yo'q (allaqachon sotilgan/transfer qilingan)
+        wallet_mints = {h["mint"] for h in holdings}
+        missing = [t for t in tracked_mints if t not in wallet_mints]
+
+        lines = ["🔍 <b>Wallet sinxronizatsiyasi</b>\n"]
+        if not untracked and not missing:
+            lines.append("✅ Hammasi mos — kuzatilayotgan pozitsiyalar wallet holati bilan bir xil.")
+        if untracked:
+            lines.append("⚠️ <b>Wallet'da bor, lekin bot kuzatmayapti</b> (TP/SL ishlamaydi!):")
+            for h in untracked:
+                lines.append(
+                    "  • <code>{}</code> — {:.4f} dona".format(h["mint"][:20] + "...", h["ui_amount"])
+                )
+            lines.append(
+                "\nBularni avtomatik tiklab bo'lmaydi (asl kirish narxi noma'lum). "
+                "Agar bu qasddan qilingan xarid bo'lsa, uni admin panelda qo'lda kuzatuvga qo'shing "
+                "yoki hozirgi narxni entry sifatida qabul qilib qo'lda yopish/kuzatishni boshlang."
+            )
+        if missing:
+            lines.append("\nℹ️ <b>Bot kuzatayapti, lekin wallet'da yo'q</b> (ehtimol qo'lda sotilgan):")
+            for t in missing:
+                pos = tracked.get(t, {})
+                lines.append("  • {} (<code>{}</code>)".format(pos.get("symbol", t[:8]), t[:20] + "..."))
+
+        await self.notifier.send_message(
+            "\n".join(lines), reply_markup=self._get_inline_keyboard()
         )
 
     async def _cmd_clean(self):
