@@ -77,20 +77,22 @@ class Settings:
     PARTIAL_TP_TRIGGER_PCT: float = _float(g("PARTIAL_TP_TRIGGER_PCT"), 0.30)
 
     # === Filtrlar ===
-    MIN_TOKEN_AGE_MINUTES: float = _float(g("MIN_TOKEN_AGE_MINUTES"), 1.0)
-    MAX_TOKEN_AGE_MINUTES: float = _float(g("MAX_TOKEN_AGE_MINUTES"), 15.0)
-    MIN_LIQUIDITY_USD: float = _float(g("MIN_LIQUIDITY_USD"), 20000)
+    # Defaultlar yangi memecoinlar uchun realistikroq qilindi —
+    # avvalgi 20k vol5m / ratio 2.0 / age 15m deyarli hech narsa o'tkazmas edi.
+    MIN_TOKEN_AGE_MINUTES: float = _float(g("MIN_TOKEN_AGE_MINUTES"), 0.5)
+    MAX_TOKEN_AGE_MINUTES: float = _float(g("MAX_TOKEN_AGE_MINUTES"), 60.0)
+    MIN_LIQUIDITY_USD: float = _float(g("MIN_LIQUIDITY_USD"), 8000)
     MAX_LIQUIDITY_USD: float = _float(g("MAX_LIQUIDITY_USD"), 0)
-    MIN_MARKET_CAP_USD: float = _float(g("MIN_MARKET_CAP_USD"), 50000)
-    MAX_MARKET_CAP_USD: float = _float(g("MAX_MARKET_CAP_USD"), 500000)
+    MIN_MARKET_CAP_USD: float = _float(g("MIN_MARKET_CAP_USD"), 15000)
+    MAX_MARKET_CAP_USD: float = _float(g("MAX_MARKET_CAP_USD"), 2_000_000)
     MIN_24H_VOLUME_USD: float = _float(g("MIN_24H_VOLUME_USD"), 0)
-    MIN_VOLUME_5M_USD: float = _float(g("MIN_VOLUME_5M_USD"), 20000)
-    MIN_VOLUME_SPIKE_PCT: float = _float(g("MIN_VOLUME_SPIKE_PCT"), 2.0)
-    MIN_BUY_SELL_RATIO: float = _float(g("MIN_BUY_SELL_RATIO"), 2.0)
-    MIN_HOLDERS: int = _int(g("MIN_HOLDERS"), 100)
-    MAX_TOP10_HOLDER_PCT: float = _float(g("MAX_TOP10_HOLDER_PCT"), 0.30)
-    MAX_DEV_WALLET_PCT: float = _float(g("MAX_DEV_WALLET_PCT"), 0.10)
-    REQUIRE_LP_LOCKED: bool = _bool(g("REQUIRE_LP_LOCKED"), True)
+    MIN_VOLUME_5M_USD: float = _float(g("MIN_VOLUME_5M_USD"), 3000)
+    MIN_VOLUME_SPIKE_PCT: float = _float(g("MIN_VOLUME_SPIKE_PCT"), 1.5)
+    MIN_BUY_SELL_RATIO: float = _float(g("MIN_BUY_SELL_RATIO"), 1.15)
+    MIN_HOLDERS: int = _int(g("MIN_HOLDERS"), 30)
+    MAX_TOP10_HOLDER_PCT: float = _float(g("MAX_TOP10_HOLDER_PCT"), 0.45)
+    MAX_DEV_WALLET_PCT: float = _float(g("MAX_DEV_WALLET_PCT"), 0.15)
+    REQUIRE_LP_LOCKED: bool = _bool(g("REQUIRE_LP_LOCKED"), False)
 
     # === AI ===
     AI_ENABLED: bool = _bool(g("AI_ENABLED"), True)
