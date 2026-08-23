@@ -106,4 +106,6 @@ class FilterPipeline:
 
     def _reject(self, symbol: str, token: str, stage: str, reason: str):
         history.add_rejection(symbol, token, stage, reason)
-        logger.debug(f"[REJECT] {symbol} → {stage}: {reason}")
+        # INFO darajasida yozamiz — aks holda foydalanuvchi nima uchun
+        # savdo ochilmayotganini bilmaydi (faqat SCAN loglari qolardi).
+        logger.info(f"[REJECT] {symbol} → {stage}: {reason}")
