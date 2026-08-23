@@ -12,7 +12,7 @@ from utils.logger import logger
 from utils.helpers import safe_float, utc_now
 from config.settings import settings
 
-SOL_MIN_RESERVE = 0.05   # Gaz uchun doim saqlab qolish kerak bo'lgan SOL
+SOL_MIN_RESERVE = 0.08  # gas + priority + ATA   # Gaz uchun doim saqlab qolish kerak bo'lgan SOL
 
 
 async def execute_buy(
