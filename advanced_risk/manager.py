@@ -41,8 +41,11 @@ class AdvancedRiskManager:
         self._paused = False
         self._pause_reason = ""
         self.consecutive_losses = 0
+        # Drawdown hisobi ham nolga — eski peak noto'g'ri pause qilmasin
+        self.peak_balance = 0.0
+        self.current_balance = 0.0
         if was_paused:
-            logger.info("AdvancedRiskManager RESUMED (consecutive_losses reset)")
+            logger.info("AdvancedRiskManager RESUMED (consecutive_losses + drawdown reset)")
         else:
             logger.info("AdvancedRiskManager resume chaqirildi (allaqachon aktiv edi)")
 
@@ -57,6 +60,14 @@ class AdvancedRiskManager:
     async def pre_trade_check(self, token: str, amount_usd: float) -> Tuple[bool, str]:
         async with self._lock:
             self._reset_daily_if_needed()
+
+            # Eski "Max drawdown" pause qolgan bo'lsa — avtomatik ochamiz
+            if self._paused and "drawdown" in (self._pause_reason or "").lower():
+                logger.info("Eski Max drawdown pause bekor qilindi: {}".format(self._pause_reason))
+                self._paused = False
+                self._pause_reason = ""
+                self.peak_balance = 0.0
+                self.current_balance = 0.0
 
             # Manual / auto pause
             if self._paused:
@@ -80,13 +91,8 @@ class AdvancedRiskManager:
                 self.pause(reason)
                 return False, reason
 
-            # Max drawdown
-            if self.peak_balance > 0 and self.current_balance > 0:
-                drawdown = (self.peak_balance - self.current_balance) / self.peak_balance
-                if drawdown >= settings.MAX_DRAWDOWN_PCT:
-                    reason = "Max drawdown: {:.1f}%".format(drawdown * 100)
-                    self.pause(reason)
-                    return False, reason
+            # Max drawdown tekshiruvi O'CHIRILGAN — foydalanuvchi so'rovi bilan.
+            # (Eski: peak/current balance asosida pause — soxta 87% drawdown berardi.)
 
             # Base risk check
             ok, reason = await self.base.pre_trade_check(token, amount_usd)
