@@ -223,8 +223,16 @@ def _sidebar(active: str = "overview") -> str:
         ("logs", "Logs"),
         ("control", "Control"),
     ]
+    # onclick — listener ishlamasa ham menyu almashtadi
     links = "".join(
-        f'<a href="#{k}" class="{"active" if k == active else ""}" data-section="{k}" role="button">{label}</a>'
+        (
+            '<a href="#{k}" class="{cls}" data-section="{k}" '
+            'onclick="return window.mbShow && window.mbShow(\'{k}\')">{label}</a>'
+        ).format(
+            k=k,
+            cls=("active" if k == active else ""),
+            label=label,
+        )
         for k, label in items
     )
     return f"""
@@ -828,83 +836,72 @@ async def _dashboard_html(bot_ref) -> str:
   </section>
 </main></div>
 <script>
-/* --- NAV: alohida, poll xatosidan mustaqil --- */
-function memebotShowSection(id) {{
-  if (!id) id = 'overview';
-  document.querySelectorAll('.section').forEach(function(s) {{
-    s.classList.remove('active');
-  }});
-  document.querySelectorAll('.nav a[data-section]').forEach(function(a) {{
-    a.classList.remove('active');
-  }});
-  var sec = document.getElementById('sec-' + id);
-  if (sec) sec.classList.add('active');
-  var link = document.querySelector('.nav a[data-section="' + id + '"]');
-  if (link) link.classList.add('active');
-  try {{ history.replaceState(null, '', '#' + id); }} catch (e) {{}}
-}}
-
-document.addEventListener('DOMContentLoaded', function() {{
-  document.querySelectorAll('.nav a[data-section]').forEach(function(a) {{
-    a.addEventListener('click', function(e) {{
-      e.preventDefault();
-      e.stopPropagation();
-      var id = this.getAttribute('data-section');
-      memebotShowSection(id);
-      return false;
-    }});
-  }});
-  var initial = (location.hash || '#overview').replace('#', '') || 'overview';
-  memebotShowSection(initial);
-}});
-
-/* --- LIVE STATS --- */
+window.mbShow = function(id) {{
+  try {{
+    if (!id) id = 'overview';
+    var sections = document.querySelectorAll('.section');
+    for (var i = 0; i < sections.length; i++) {{
+      sections[i].classList.remove('active');
+      sections[i].style.display = 'none';
+    }}
+    var sec = document.getElementById('sec-' + id);
+    if (sec) {{
+      sec.classList.add('active');
+      sec.style.display = 'block';
+    }}
+    var links = document.querySelectorAll('.nav a[data-section]');
+    for (var j = 0; j < links.length; j++) {{
+      links[j].classList.remove('active');
+      if (links[j].getAttribute('data-section') === id) {{
+        links[j].classList.add('active');
+      }}
+    }}
+    try {{ history.replaceState(null, '', '#' + id); }} catch (e1) {{}}
+  }} catch (e2) {{ console.error(e2); }}
+  return false;
+}};
 (function() {{
-  function money(n, d) {{
-    if (n === null || n === undefined || isNaN(n)) return '—';
+  var hash = (location.hash || '#overview').replace('#', '') || 'overview';
+  if (document.readyState === 'loading') {{
+    document.addEventListener('DOMContentLoaded', function() {{ window.mbShow(hash); }});
+  }} else {{
+    window.mbShow(hash);
+  }}
+}})();
+
+/* live stats */
+(function() {{
+  function money(n) {{
+    if (n === null || n === undefined || isNaN(n)) return '-';
     var x = Number(n);
-    var s = (x >= 0 ? '+' : '') + x.toFixed(d === undefined ? 2 : d);
-    return '$' + s;
+    return '$' + (x >= 0 ? '+' : '') + x.toFixed(2);
   }}
   function esc(s) {{
     return String(s == null ? '' : s)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }}
   function setTxt(id, v) {{
     var el = document.getElementById(id);
     if (el) el.textContent = v;
   }}
-  function setColor(id, color) {{
+  function setColor(id, c) {{
     var el = document.getElementById(id);
-    if (el) el.style.color = color;
+    if (el) el.style.color = c;
   }}
-
   async function poll() {{
     var dot = document.getElementById('live-dot');
     try {{
       var r = await fetch('/dashboard/live', {{ credentials: 'same-origin', cache: 'no-store' }});
-      if (!r.ok) {{
-        if (dot) dot.style.background = '#ef4444';
-        return;
-      }}
+      if (!r.ok) {{ if (dot) dot.style.background = '#ef4444'; return; }}
       var d = await r.json();
-      if (dot) {{
-        dot.style.background = '#22c55e';
-        dot.style.boxShadow = '0 0 6px #22c55e';
-      }}
+      if (dot) {{ dot.style.background = '#22c55e'; }}
       var ts = document.getElementById('live-ts');
       if (ts) ts.textContent = 'yangilandi ' + new Date().toLocaleTimeString();
-
-      setTxt('st-bot', d.running ? '✅' : '🛑');
+      setTxt('st-bot', d.running ? 'OK' : 'STOP');
       setTxt('st-mode', d.paper ? 'PAPER' : 'LIVE');
       setTxt('st-open', (d.open_count || 0) + '/' + (d.max_open || 5));
-      if (d.unrealized_pnl === null || d.unrealized_pnl === undefined) {{
-        setTxt('st-upnl', '—');
-      }} else {{
-        setTxt('st-upnl', money(d.unrealized_pnl));
-        setColor('st-upnl', d.unrealized_pnl >= 0 ? '#22c55e' : '#ef4444');
-      }}
+      if (d.unrealized_pnl == null) setTxt('st-upnl', '-');
+      else {{ setTxt('st-upnl', money(d.unrealized_pnl)); setColor('st-upnl', d.unrealized_pnl >= 0 ? '#22c55e' : '#ef4444'); }}
       setTxt('st-dloss', '$' + Number(d.daily_loss || 0).toFixed(2));
       setTxt('st-net', money(d.net_pnl));
       setColor('st-net', (d.net_pnl || 0) >= 0 ? '#22c55e' : '#ef4444');
@@ -917,82 +914,61 @@ document.addEventListener('DOMContentLoaded', function() {{
       setTxt('tr-profit', '$' + Number(d.profit || 0).toFixed(2));
       setTxt('tr-loss', '$' + Number(d.loss || 0).toFixed(2));
       setTxt('tr-bw', money(d.best) + ' / ' + money(d.worst));
-
-      var badges = document.getElementById('top-badges');
-      if (badges) {{
-        function b(on, onT, offT) {{
-          return on
-            ? '<span class="badge on">' + onT + '</span>'
-            : '<span class="badge off">' + offT + '</span>';
-        }}
-        badges.innerHTML = b(d.running, 'RUNNING', 'STOPPED') + ' ' +
-          b(d.paper, 'PAPER', 'LIVE') + ' ' +
-          (d.emergency
-            ? '<span class="badge off">EMERGENCY</span>'
-            : '<span class="badge on">SAFE</span>');
-      }}
-
       var cards = document.getElementById('open-pnl-cards');
       if (cards) {{
         var pos = d.positions || [];
         if (!pos.length) {{
-          cards.innerHTML = '<div class="stat"><div class="label">Ochiq savdo</div><div class="value" style="font-size:14px;color:var(--muted)">Hozircha yo\'q</div></div>';
+          cards.innerHTML = '<div class="stat"><div class="label">Ochiq savdo</div><div class="value" style="font-size:14px;color:var(--muted)">Hozircha yoq</div></div>';
         }} else {{
-          cards.innerHTML = pos.map(function(p) {{
+          var html = '';
+          for (var i = 0; i < pos.length; i++) {{
+            var p = pos[i];
             var ok = (p.current_price || 0) > 0 && (p.entry_price || 0) > 0;
             var col = !ok ? 'var(--muted)' : (p.pnl_usd >= 0 ? '#22c55e' : '#ef4444');
-            var arrow = !ok ? '·' : (p.pnl_usd >= 0 ? '▲' : '▼');
-            var pnlTxt = !ok ? 'narx kutilmoqda...' : (arrow + ' ' + money(p.pnl_usd));
-            var pct = !ok ? '' : (p.pnl_pct >= 0 ? '+' : '') + Number(p.pnl_pct).toFixed(1) + '%';
-            var cur = (p.current_price || 0) > 0 ? ('$' + Number(p.current_price).toPrecision(6)) : '—';
-            return '<div class="stat" style="border-left:3px solid ' + col + '">' +
-              '<div class="label">' + esc(p.symbol) + ' · $' + Number(p.amount_usd || 0).toFixed(0) + '</div>' +
-              '<div class="value" style="font-size:20px;color:' + col + '">' + pnlTxt + '</div>' +
-              '<div class="muted" style="margin-top:4px;font-size:12px">' + pct +
-              ' · entry $' + Number(p.entry_price || 0).toPrecision(6) + ' → ' + cur + '</div></div>';
-          }}).join('');
+            var arrow = !ok ? '.' : (p.pnl_usd >= 0 ? 'UP' : 'DN');
+            var pnlTxt = !ok ? 'narx...' : (arrow + ' ' + money(p.pnl_usd));
+            var pct = !ok ? '' : ((p.pnl_pct >= 0 ? '+' : '') + Number(p.pnl_pct).toFixed(1) + '%');
+            html += '<div class="stat" style="border-left:3px solid ' + col + '"><div class="label">' +
+              esc(p.symbol) + ' · $' + Number(p.amount_usd || 0).toFixed(0) +
+              '</div><div class="value" style="font-size:20px;color:' + col + '">' + pnlTxt +
+              '</div><div class="muted" style="margin-top:4px;font-size:12px">' + pct + '</div></div>';
+          }}
+          cards.innerHTML = html;
         }}
       }}
-
       var tbody = document.getElementById('positions-tbody');
       if (tbody) {{
         var pos2 = d.positions || [];
         if (!pos2.length) {{
-          tbody.innerHTML = '<tr><td colspan="9" class="muted">Ochiq pozitsiya yo\'q</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="9" class="muted">Ochiq pozitsiya yoq</td></tr>';
         }} else {{
-          tbody.innerHTML = pos2.map(function(p) {{
-            var ok = (p.current_price || 0) > 0 && (p.entry_price || 0) > 0;
-            var cls = !ok ? 'muted' : (p.pnl_usd >= 0 ? 'pnl-pos' : 'pnl-neg');
-            var arrow = !ok ? '' : (p.pnl_usd >= 0 ? '▲ ' : '▼ ');
-            var pnl = !ok ? 'narx kutilmoqda...' :
-              (arrow + money(p.pnl_usd) + ' (' + (p.pnl_pct >= 0 ? '+' : '') + Number(p.pnl_pct).toFixed(1) + '%)');
-            var cur = ok ? ('$' + Number(p.current_price).toFixed(8)) : '—';
-            var tok = esc(p.token || '');
-            return '<tr><td><strong>' + esc(p.symbol) + '</strong></td>' +
-              '<td class="mono">' + tok.slice(0, 12) + '…</td>' +
-              '<td>$' + Number(p.amount_usd || 0).toFixed(2) + '</td>' +
-              '<td class="mono">$' + Number(p.entry_price || 0).toFixed(8) + '</td>' +
-              '<td class="mono">' + cur + '</td>' +
-              '<td class="' + cls + '" style="font-weight:700;font-size:15px">' + pnl + '</td>' +
-              '<td>' + esc(p.ai_score != null ? p.ai_score : '—') + '</td>' +
-              '<td class="muted">' + (p.paper ? 'PAPER' : 'LIVE') + '</td>' +
-              '<td><form class="inline" method="post" action="/dashboard/positions/close" onsubmit="return confirm(\'Yopish?\');">' +
+          var rows = '';
+          for (var k = 0; k < pos2.length; k++) {{
+            var p2 = pos2[k];
+            var ok2 = (p2.current_price || 0) > 0 && (p2.entry_price || 0) > 0;
+            var cls = !ok2 ? 'muted' : (p2.pnl_usd >= 0 ? 'pnl-pos' : 'pnl-neg');
+            var pnl2 = !ok2 ? '...' : money(p2.pnl_usd) + ' (' + Number(p2.pnl_pct).toFixed(1) + '%)';
+            var cur2 = ok2 ? ('$' + Number(p2.current_price).toFixed(8)) : '-';
+            var tok = esc(p2.token || '');
+            rows += '<tr><td><strong>' + esc(p2.symbol) + '</strong></td><td class="mono">' +
+              tok.slice(0,12) + '...</td><td>$' + Number(p2.amount_usd||0).toFixed(2) +
+              '</td><td class="mono">$' + Number(p2.entry_price||0).toFixed(8) +
+              '</td><td class="mono">' + cur2 + '</td><td class="' + cls + '" style="font-weight:700">' +
+              pnl2 + '</td><td>' + esc(p2.ai_score != null ? p2.ai_score : '-') +
+              '</td><td class="muted">' + (p2.paper ? 'PAPER' : 'LIVE') +
+              '</td><td><form class="inline" method="post" action="/dashboard/positions/close">' +
               '<input type="hidden" name="token" value="' + tok + '">' +
               '<button class="stop" type="submit" style="padding:4px 8px;font-size:11px">Yopish</button></form></td></tr>';
-          }}).join('');
+          }}
+          tbody.innerHTML = rows;
         }}
       }}
-    }} catch (e) {{
+    }} catch (err) {{
       if (dot) dot.style.background = '#f59e0b';
-      console.warn('live poll', e);
+      console.warn('live', err);
     }}
   }}
-  if (document.readyState === 'loading') {{
-    document.addEventListener('DOMContentLoaded', function() {{ poll(); setInterval(poll, 5000); }});
-  }} else {{
-    poll();
-    setInterval(poll, 5000);
-  }}
+  setTimeout(function() {{ poll(); setInterval(poll, 5000); }}, 500);
 }})();
 </script></script>
 </body></html>"""
