@@ -307,8 +307,12 @@ PAGE_STYLE = """
     border: 1px solid rgba(99,102,241,.2);
   }
   form.inline { display: inline; }
+  /* Bo'limlar: .active (JS) yoki :target (hash, JS yo'q bo'lsa ham) */
   .section { display: none !important; }
-  .section.active { display: block !important; }
+  .section.active,
+  .section:target { display: block !important; }
+  /* Hash bo'lmasa Overview default */
+  body:not(:has(.section:target)):not(:has(.section.active)) #sec-overview { display: block !important; }
   .pnl-pos { color: #34d399; font-weight: 700; }
   .pnl-neg { color: #fb7185; font-weight: 700; }
   .pnl-card {
@@ -456,7 +460,7 @@ def _sidebar(active: str = "overview") -> str:
     # onclick — listener ishlamasa ham menyu almashtadi
     links = "".join(
         (
-            '<a href="#{k}" class="{cls}" data-section="{k}" role="button">{label}</a>'
+            '<a href="#sec-{k}" class="{cls}" data-section="{k}" role="button">{label}</a>'
         ).format(
             k=k,
             cls=("active" if k == active else ""),
@@ -842,7 +846,7 @@ async def _dashboard_html(bot_ref) -> str:
     </div>
   </div>
 
-  <section id="sec-overview" class="section active">
+  <section id="sec-overview" class="section">
     <div class="grid" id="stats-grid">
       <div class="stat"><div class="label">Bot</div><div class="value" id="st-bot">{'✅' if running else '🛑'}</div></div>
       <div class="stat"><div class="label">Mode</div><div class="value" id="st-mode" style="font-size:16px">{'PAPER' if paper else 'LIVE'}</div></div>
@@ -1081,7 +1085,8 @@ async def _dashboard_html(bot_ref) -> str:
 window.mbShow = function(id) {{
   try {{
     if (!id) id = 'overview';
-    id = String(id).replace(/^#/, '');
+    id = String(id).replace(/^#/, '').replace(/^sec-/, '');
+    document.body.classList.remove('no-hash');
     var sections = document.querySelectorAll('.section');
     for (var i = 0; i < sections.length; i++) {{
       sections[i].classList.remove('active');
@@ -1094,38 +1099,48 @@ window.mbShow = function(id) {{
     if (sec) sec.classList.add('active');
     var links = document.querySelectorAll('.nav a[data-section]');
     for (var j = 0; j < links.length; j++) {{
-      var isOn = links[j].getAttribute('data-section') === id;
-      if (isOn) links[j].classList.add('active');
+      if (links[j].getAttribute('data-section') === id) links[j].classList.add('active');
       else links[j].classList.remove('active');
     }}
-    try {{ history.replaceState(null, '', '#' + id); }} catch (e1) {{}}
+    try {{ history.replaceState(null, '', '#sec-' + id); }} catch (e1) {{}}
   }} catch (e2) {{ console.error('mbShow', e2); }}
   return false;
 }};
 (function() {{
+  function parseHash() {{
+    var h = (location.hash || '').replace(/^#/, '');
+    if (!h) return '';
+    return h.replace(/^sec-/, '');
+  }}
   function boot() {{
-    var hash = (location.hash || '#overview').replace('#', '') || 'overview';
-    window.mbShow(hash);
-    // Sidebar clicks — event delegation (inline onclick shart emas)
+    var h = parseHash();
+    if (!h) {{
+      document.body.classList.add('no-hash');
+      window.mbShow('overview');
+    }} else {{
+      window.mbShow(h);
+    }}
     var nav = document.querySelector('.nav');
     if (nav) {{
       nav.addEventListener('click', function(ev) {{
-        var a = ev.target.closest ? ev.target.closest('a[data-section]') : null;
-        if (!a) return;
-        ev.preventDefault();
-        window.mbShow(a.getAttribute('data-section'));
+        var t = ev.target;
+        while (t && t !== nav) {{
+          if (t.getAttribute && t.getAttribute('data-section')) {{
+            ev.preventDefault();
+            window.mbShow(t.getAttribute('data-section'));
+            return;
+          }}
+          t = t.parentNode;
+        }}
       }});
     }}
     window.addEventListener('hashchange', function() {{
-      var h = (location.hash || '#overview').replace('#', '') || 'overview';
-      window.mbShow(h);
+      var hh = parseHash();
+      window.mbShow(hh || 'overview');
     }});
   }}
-  if (document.readyState === 'loading') {{
-    document.addEventListener('DOMContentLoaded', boot);
-  }} else {{
-    boot();
-  }}
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  else boot();
 }})();
 
 /* live stats */
