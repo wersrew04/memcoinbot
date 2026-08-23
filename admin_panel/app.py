@@ -23,9 +23,16 @@ ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 
 
 def _persist_to_env(key: str, value: Any) -> None:
-    """Best-effort persistence of a runtime setting change to .env so it
-    survives a restart. Never raises – a write failure should not break the
-    admin panel request that triggered it."""
+    """Sozlamani saqlash:
+    1) DATA_DIR/runtime_settings.json (Railway Volume — redeployda saqlanadi)
+    2) lokal .env (ixtiyoriy)
+    PRIVATE_KEY va API kalitlarini Railway Variables ga yozing.
+    """
+    try:
+        from config.settings import persist_runtime_setting
+        persist_runtime_setting(key, value)
+    except Exception:
+        pass
     if _dotenv_set_key is None:
         return
     try:
@@ -260,6 +267,120 @@ def _read_log_tail(n: int = 80) -> List[str]:
         return []
 
 
+
+async def _live_snapshot(bot_ref) -> dict:
+    """Dashboard uchun jonli statistika (JSON)."""
+    from utils.helpers import pnl_percent, pnl_usd as calc_pnl_usd
+
+    running = settings.BOT_RUNNING
+    paper = settings.PAPER_TRADING
+    emergency = settings.EMERGENCY_STOP
+    if bot_ref and hasattr(bot_ref, "advanced_risk"):
+        emergency = emergency or getattr(bot_ref.advanced_risk, "emergency_stop", False)
+
+    open_count = 0
+    daily_loss = 0.0
+    positions_out = []
+    unrealized = 0.0
+    known = 0
+
+    if bot_ref and hasattr(bot_ref, "risk"):
+        summary = await bot_ref.risk.get_status_summary()
+        positions = summary.get("positions", {}) or {}
+        if bot_ref and hasattr(bot_ref, "monitor") and positions:
+            async def _upd(tok: str):
+                try:
+                    price = await bot_ref.monitor.get_current_price(tok)
+                    if price > 0:
+                        await bot_ref.risk.update_position(tok, {"current_price": price})
+                except Exception:
+                    pass
+            await asyncio.gather(*(_upd(t) for t in positions.keys()))
+            summary = await bot_ref.risk.get_status_summary()
+            positions = summary.get("positions", {}) or {}
+
+        open_count = summary.get("open_positions", len(positions))
+        daily_loss = float(summary.get("daily_loss_usd", 0) or 0)
+
+        for token, pos in positions.items():
+            entry = float(pos.get("entry_price") or 0)
+            amount = float(pos.get("amount_usd") or 0)
+            symbol = pos.get("symbol", token[:8])
+            try:
+                current = float(pos.get("current_price") or 0)
+            except (TypeError, ValueError):
+                current = 0.0
+            if entry > 0 and current > 0:
+                pct = pnl_percent(entry, current)
+                usd = calc_pnl_usd(amount, entry, current)
+                unrealized += usd
+                known += 1
+            else:
+                pct, usd = 0.0, 0.0
+            positions_out.append({
+                "token": token,
+                "symbol": symbol,
+                "amount_usd": amount,
+                "entry_price": entry,
+                "current_price": current,
+                "pnl_usd": round(usd, 4),
+                "pnl_pct": round(pct, 2),
+                "ai_score": pos.get("ai_score"),
+                "paper": bool(pos.get("paper")),
+            })
+
+    pnl = history.pnl_summary()
+    adv = {}
+    if bot_ref and hasattr(bot_ref, "advanced_risk"):
+        try:
+            adv = bot_ref.advanced_risk.status()
+        except Exception:
+            adv = {}
+
+    wallet_sol = 0.0
+    wallet_usd = 0.0
+    wallet_pub = ""
+    try:
+        from wallet.keypair import get_pubkey, get_sol_balance, get_sol_price_usd
+        wallet_pub = get_pubkey() or ""
+        if wallet_pub and bot_ref and getattr(bot_ref, "_session", None):
+            wallet_sol = await get_sol_balance(bot_ref._session, wallet_pub)
+            px = await get_sol_price_usd(bot_ref._session)
+            wallet_usd = wallet_sol * px
+    except Exception:
+        pass
+
+    return {
+        "ts": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+        "running": running,
+        "paper": paper,
+        "emergency": emergency,
+        "open_count": open_count,
+        "max_open": settings.MAX_OPEN_POSITIONS,
+        "unrealized_pnl": round(unrealized, 4) if known else None,
+        "daily_loss": round(daily_loss, 4),
+        "net_pnl": pnl.get("net_pnl", 0),
+        "profit": pnl.get("profit", 0),
+        "loss": pnl.get("loss", 0),
+        "win_rate": pnl.get("win_rate", 0),
+        "total_trades": pnl.get("total_trades", 0),
+        "best": pnl.get("best", 0),
+        "worst": pnl.get("worst", 0),
+        "trade_amount": settings.TRADE_AMOUNT_USD,
+        "wallet_sol": round(wallet_sol, 6),
+        "wallet_usd": round(wallet_usd, 2),
+        "wallet_pub": wallet_pub,
+        "positions": positions_out,
+        "adv": {
+            "paused": adv.get("paused"),
+            "consecutive_losses": adv.get("consecutive_losses", 0),
+            "daily_trades": adv.get("daily_trades", 0),
+            "max_daily_trades": adv.get("max_daily_trades"),
+            "pause_reason": adv.get("pause_reason") or "",
+        },
+    }
+
+
 async def _dashboard_html(bot_ref) -> str:
     running = settings.BOT_RUNNING
     paper = settings.PAPER_TRADING
@@ -459,13 +580,14 @@ async def _dashboard_html(bot_ref) -> str:
 
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MemeBot Pro Admin</title><meta http-equiv="refresh" content="30">{PAGE_STYLE}</head><body>
+<title>MemeBot Pro Admin</title>{PAGE_STYLE}</head><body>
 <div class="layout">
 {_sidebar("overview")}
 <main class="main">
   <div class="topbar">
-    <h1>Dashboard</h1>
-    <div>
+    <h1>Dashboard <span id="live-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;margin-left:8px;vertical-align:middle" title="jonli"></span>
+      <span id="live-ts" class="muted" style="font-size:12px;font-weight:400;margin-left:6px"></span></h1>
+    <div id="top-badges">
       {_bool_badge(running, "RUNNING", "STOPPED")}
       {_bool_badge(paper, "PAPER", "LIVE")}
       {emerg_badge}
@@ -473,23 +595,23 @@ async def _dashboard_html(bot_ref) -> str:
   </div>
 
   <section id="sec-overview" class="section active">
-    <div class="grid">
-      <div class="stat"><div class="label">Bot</div><div class="value">{'✅' if running else '🛑'}</div></div>
-      <div class="stat"><div class="label">Mode</div><div class="value" style="font-size:16px">{'PAPER' if paper else 'LIVE'}</div></div>
-      <div class="stat"><div class="label">Open</div><div class="value">{open_count}/{settings.MAX_OPEN_POSITIONS}</div></div>
-      <div class="stat"><div class="label">Ochiq PnL</div><div class="value" style="font-size:18px;color:{u_color}">{u_label}</div></div>
-      <div class="stat"><div class="label">Daily loss</div><div class="value" style="font-size:16px">${daily_loss:.2f}</div></div>
-      <div class="stat"><div class="label">Yopilgan Net PnL</div><div class="value" style="font-size:16px;color:{net_color}">${pnl['net_pnl']:+.2f}</div></div>
-      <div class="stat"><div class="label">Win rate</div><div class="value" style="font-size:16px">{pnl['win_rate']}%</div></div>
-      <div class="stat"><div class="label">Trades</div><div class="value">{pnl['total_trades']}</div></div>
-      <div class="stat"><div class="label">Trade $</div><div class="value" style="font-size:16px">${settings.TRADE_AMOUNT_USD:.0f}</div></div>
-      <div class="stat"><div class="label">SOL balans</div><div class="value" style="font-size:16px">{wallet_sol:.4f}</div></div>
-      <div class="stat"><div class="label">SOL ≈ USD</div><div class="value" style="font-size:16px">${wallet_sol_usd:.2f}</div></div>
+    <div class="grid" id="stats-grid">
+      <div class="stat"><div class="label">Bot</div><div class="value" id="st-bot">{'✅' if running else '🛑'}</div></div>
+      <div class="stat"><div class="label">Mode</div><div class="value" id="st-mode" style="font-size:16px">{'PAPER' if paper else 'LIVE'}</div></div>
+      <div class="stat"><div class="label">Open</div><div class="value" id="st-open">{open_count}/{settings.MAX_OPEN_POSITIONS}</div></div>
+      <div class="stat"><div class="label">Ochiq PnL</div><div class="value" id="st-upnl" style="font-size:18px;color:{u_color}">{u_label}</div></div>
+      <div class="stat"><div class="label">Daily loss</div><div class="value" id="st-dloss" style="font-size:16px">${daily_loss:.2f}</div></div>
+      <div class="stat"><div class="label">Yopilgan Net PnL</div><div class="value" id="st-net" style="font-size:16px;color:{net_color}">${pnl['net_pnl']:+.2f}</div></div>
+      <div class="stat"><div class="label">Win rate</div><div class="value" id="st-wr" style="font-size:16px">{pnl['win_rate']}%</div></div>
+      <div class="stat"><div class="label">Trades</div><div class="value" id="st-trades">{pnl['total_trades']}</div></div>
+      <div class="stat"><div class="label">Trade $</div><div class="value" id="st-trade$" style="font-size:16px">${settings.TRADE_AMOUNT_USD:.0f}</div></div>
+      <div class="stat"><div class="label">SOL balans</div><div class="value" id="st-sol" style="font-size:16px">{wallet_sol:.4f}</div></div>
+      <div class="stat"><div class="label">SOL ≈ USD</div><div class="value" id="st-solusd" style="font-size:16px">${wallet_sol_usd:.2f}</div></div>
     </div>
     <div class="card">
-      <h2>📈 Ochiq savdolar (jonli PnL)</h2>
-      <p class="muted" style="margin:0 0 12px;font-size:12px">Yashil = foyda (+) · Qizil = zarar (−). Sahifa yangilanganda DexScreener narxi olinadi.</p>
-      <div class="grid">{open_pnl_cards}</div>
+      <h2>📈 Ochiq savdolar (jonli PnL) <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0">· har 5s</span></h2>
+      <p class="muted" style="margin:0 0 12px;font-size:12px">Yashil = foyda (+) · Qizil = zarar (−). Avtomatik yangilanadi.</p>
+      <div class="grid" id="open-pnl-cards">{open_pnl_cards}</div>
     </div>
     <div class="card">
       <h2>👛 Hamyon</h2>
@@ -500,6 +622,21 @@ async def _dashboard_html(bot_ref) -> str:
         <div class="stat"><div class="label">Holat</div><div class="value" style="font-size:13px">{'✅ ulangan' if wallet_pubkey and not wallet_err else _esc(wallet_err or 'ulangan emas')}</div></div>
       </div>
       <p class="muted" style="margin-top:10px;font-size:12px">To'liq manzil: <code class="mono">{_esc(wallet_pubkey or '—')}</code></p>
+    </div>
+    <div class="card" style="border-color:{'#22c55e' if str(getattr(settings, 'DATA_DIR', 'data')).startswith('/data') else '#f59e0b'}">
+      <h2>💾 Sozlamalar saqlanishi</h2>
+      <div class="grid" style="margin-bottom:10px">
+        <div class="stat"><div class="label">DATA_DIR</div><div class="value" style="font-size:13px;font-family:monospace">{_esc(getattr(settings, 'DATA_DIR', 'data'))}</div></div>
+        <div class="stat"><div class="label">Volume</div><div class="value" style="font-size:14px">{'✅ /data' if str(getattr(settings, 'DATA_DIR', '')).startswith('/data') else '⚠️ yoq (redeployda yoqoladi)'}</div></div>
+        <div class="stat"><div class="label">TG token</div><div class="value" style="font-size:14px">{'✅' if getattr(settings, 'TELEGRAM_BOT_TOKEN', '') else '❌'}</div></div>
+        <div class="stat"><div class="label">PRIVATE_KEY</div><div class="value" style="font-size:14px">{'✅' if getattr(settings, 'PRIVATE_KEY', '') else '❌'}</div></div>
+        <div class="stat"><div class="label">Birdeye</div><div class="value" style="font-size:14px">{'✅' if getattr(settings, 'BIRDEYE_API_KEY', '') else '❌'}</div></div>
+      </div>
+      <p style="margin:0;font-size:13px;line-height:1.55">
+        <b>API / PRIVATE_KEY</b> → Railway <b>Variables</b> (har deployda saqlanadi).<br>
+        <b>Filtrlar, trade $</b> → admin panel → <code>DATA_DIR/runtime_settings.json</code>.
+        Buning uchun Volume: mount <code>/data</code> + Variable <code>DATA_DIR=/data</code>.
+      </p>
     </div>
     <div class="card">
       <h2>Tezkor boshqaruv</h2>
@@ -531,16 +668,16 @@ async def _dashboard_html(bot_ref) -> str:
         </form>
       </div>
       <table><thead><tr><th>Symbol</th><th>Token</th><th>Amount</th><th>Entry</th><th>Current</th><th>PnL</th><th>AI</th><th>Mode</th><th>Action</th></tr></thead>
-      <tbody>{positions_rows}</tbody></table>
+      <tbody id="positions-tbody">{positions_rows}</tbody></table>
     </div>
   </section>
 
   <section id="sec-trades" class="section">
     <div class="grid">
-      <div class="stat"><div class="label">Net PnL</div><div class="value" style="font-size:18px">${pnl['net_pnl']:+.2f}</div></div>
-      <div class="stat"><div class="label">Profit</div><div class="value" style="font-size:18px;color:var(--ok)">${pnl['profit']:.2f}</div></div>
-      <div class="stat"><div class="label">Loss</div><div class="value" style="font-size:18px;color:var(--bad)">${pnl['loss']:.2f}</div></div>
-      <div class="stat"><div class="label">Best / Worst</div><div class="value" style="font-size:14px">${pnl['best']:+.2f} / ${pnl['worst']:+.2f}</div></div>
+      <div class="stat"><div class="label">Net PnL</div><div class="value" id="tr-net" style="font-size:18px">${pnl['net_pnl']:+.2f}</div></div>
+      <div class="stat"><div class="label">Profit</div><div class="value" id="tr-profit" style="font-size:18px;color:var(--ok)">${pnl['profit']:.2f}</div></div>
+      <div class="stat"><div class="label">Loss</div><div class="value" id="tr-loss" style="font-size:18px;color:var(--bad)">${pnl['loss']:.2f}</div></div>
+      <div class="stat"><div class="label">Best / Worst</div><div class="value" id="tr-bw" style="font-size:14px">${pnl['best']:+.2f} / ${pnl['worst']:+.2f}</div></div>
     </div>
     <div class="card"><h2>Yopilgan savdolar</h2>
       <table><thead><tr><th>Time</th><th>Symbol</th><th>PnL $</th><th>PnL %</th><th>Reason</th><th>AI</th></tr></thead>
@@ -709,8 +846,130 @@ async def _dashboard_html(bot_ref) -> str:
     }});
   }});
   show((location.hash || '#overview').replace('#','') || 'overview');
+
+  function money(n, d){{
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    const x = Number(n);
+    const s = (x >= 0 ? '+' : '') + x.toFixed(d === undefined ? 2 : d);
+    return '$' + s;
+  }}
+  function esc(s){{
+    return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }}
+  function setTxt(id, v){{
+    const el = document.getElementById(id);
+    if (el) el.textContent = v;
+  }}
+  function setColor(id, color){{
+    const el = document.getElementById(id);
+    if (el) el.style.color = color;
+  }}
+
+  async function poll(){{
+    const dot = document.getElementById('live-dot');
+    try {{
+      const r = await fetch('/dashboard/live', {{credentials: 'same-origin', cache: 'no-store'}});
+      if (!r.ok) {{
+        if (dot) dot.style.background = '#ef4444';
+        return;
+      }}
+      const d = await r.json();
+      if (dot) {{ dot.style.background = '#22c55e'; dot.style.boxShadow = '0 0 6px #22c55e'; }}
+      const ts = document.getElementById('live-ts');
+      if (ts) ts.textContent = 'yangilandi ' + new Date().toLocaleTimeString();
+
+      setTxt('st-bot', d.running ? '✅' : '🛑');
+      setTxt('st-mode', d.paper ? 'PAPER' : 'LIVE');
+      setTxt('st-open', (d.open_count || 0) + '/' + (d.max_open || 5));
+      if (d.unrealized_pnl === null || d.unrealized_pnl === undefined) {{
+        setTxt('st-upnl', '—');
+      }} else {{
+        setTxt('st-upnl', money(d.unrealized_pnl));
+        setColor('st-upnl', d.unrealized_pnl >= 0 ? '#22c55e' : '#ef4444');
+      }}
+      setTxt('st-dloss', '$' + Number(d.daily_loss || 0).toFixed(2));
+      setTxt('st-net', money(d.net_pnl));
+      setColor('st-net', (d.net_pnl || 0) >= 0 ? '#22c55e' : '#ef4444');
+      setTxt('st-wr', (d.win_rate || 0) + '%');
+      setTxt('st-trades', d.total_trades || 0);
+      setTxt('st-trade$', '$' + Number(d.trade_amount || 0).toFixed(0));
+      setTxt('st-sol', Number(d.wallet_sol || 0).toFixed(4));
+      setTxt('st-solusd', '$' + Number(d.wallet_usd || 0).toFixed(2));
+
+      setTxt('tr-net', money(d.net_pnl));
+      setTxt('tr-profit', '$' + Number(d.profit || 0).toFixed(2));
+      setTxt('tr-loss', '$' + Number(d.loss || 0).toFixed(2));
+      setTxt('tr-bw', money(d.best) + ' / ' + money(d.worst));
+
+      const badges = document.getElementById('top-badges');
+      if (badges) {{
+        const b = (on, onT, offT) => on
+          ? '<span class="badge on">' + onT + '</span>'
+          : '<span class="badge off">' + offT + '</span>';
+        badges.innerHTML = b(d.running,'RUNNING','STOPPED') + ' ' +
+          b(d.paper,'PAPER','LIVE') + ' ' +
+          (d.emergency ? '<span class="badge off">EMERGENCY</span>' : '<span class="badge on">SAFE</span>');
+      }}
+
+      const cards = document.getElementById('open-pnl-cards');
+      if (cards) {{
+        const pos = d.positions || [];
+        if (!pos.length) {{
+          cards.innerHTML = '<div class="stat"><div class="label">Ochiq savdo</div><div class="value" style="font-size:14px;color:var(--muted)">Hozircha yo\'q</div></div>';
+        }} else {{
+          cards.innerHTML = pos.map(p => {{
+            const ok = (p.current_price || 0) > 0 && (p.entry_price || 0) > 0;
+            const col = !ok ? 'var(--muted)' : (p.pnl_usd >= 0 ? '#22c55e' : '#ef4444');
+            const arrow = !ok ? '·' : (p.pnl_usd >= 0 ? '▲' : '▼');
+            const pnlTxt = !ok ? 'narx kutilmoqda...' : (arrow + ' ' + money(p.pnl_usd));
+            const pct = !ok ? '' : (p.pnl_pct >= 0 ? '+' : '') + Number(p.pnl_pct).toFixed(1) + '%';
+            const cur = (p.current_price || 0) > 0 ? ('$' + Number(p.current_price).toPrecision(6)) : '—';
+            return '<div class="stat" style="border-left:3px solid ' + col + '">' +
+              '<div class="label">' + esc(p.symbol) + ' · $' + Number(p.amount_usd||0).toFixed(0) + '</div>' +
+              '<div class="value" style="font-size:20px;color:' + col + '">' + pnlTxt + '</div>' +
+              '<div class="muted" style="margin-top:4px;font-size:12px">' + pct +
+              ' · entry $' + Number(p.entry_price||0).toPrecision(6) + ' → ' + cur + '</div></div>';
+          }}).join('');
+        }}
+      }}
+
+      const tbody = document.getElementById('positions-tbody');
+      if (tbody) {{
+        const pos = d.positions || [];
+        if (!pos.length) {{
+          tbody.innerHTML = '<tr><td colspan="9" class="muted">Ochiq pozitsiya yo\'q</td></tr>';
+        }} else {{
+          tbody.innerHTML = pos.map(p => {{
+            const ok = (p.current_price || 0) > 0 && (p.entry_price || 0) > 0;
+            const cls = !ok ? 'muted' : (p.pnl_usd >= 0 ? 'pnl-pos' : 'pnl-neg');
+            const arrow = !ok ? '' : (p.pnl_usd >= 0 ? '▲ ' : '▼ ');
+            const pnl = !ok ? 'narx kutilmoqda...' :
+              (arrow + money(p.pnl_usd) + ' (' + (p.pnl_pct >= 0 ? '+' : '') + Number(p.pnl_pct).toFixed(1) + '%)');
+            const cur = ok ? ('$' + Number(p.current_price).toFixed(8)) : '—';
+            const tok = esc(p.token || '');
+            return '<tr><td><strong>' + esc(p.symbol) + '</strong></td>' +
+              '<td class="mono">' + tok.slice(0,12) + '…</td>' +
+              '<td>$' + Number(p.amount_usd||0).toFixed(2) + '</td>' +
+              '<td class="mono">$' + Number(p.entry_price||0).toFixed(8) + '</td>' +
+              '<td class="mono">' + cur + '</td>' +
+              '<td class="' + cls + '" style="font-weight:700;font-size:15px">' + pnl + '</td>' +
+              '<td>' + esc(p.ai_score != null ? p.ai_score : '—') + '</td>' +
+              '<td class="muted">' + (p.paper ? 'PAPER' : 'LIVE') + '</td>' +
+              '<td><form class="inline" method="post" action="/dashboard/positions/close" onsubmit="return confirm(\'Yopish?\');">' +
+              '<input type="hidden" name="token" value="' + tok + '">' +
+              '<button class="stop" type="submit" style="padding:4px 8px;font-size:11px">Yopish</button></form></td></tr>';
+          }}).join('');
+        }}
+      }}
+    }} catch (e) {{
+      if (dot) dot.style.background = '#f59e0b';
+      console.warn('live poll', e);
+    }}
+  }}
+  poll();
+  setInterval(poll, 5000);
 }})();
-</script>
+</script></script>
 </body></html>"""
 
 
@@ -739,6 +998,13 @@ def create_admin_app(bot_ref=None) -> FastAPI:
         if (r := _require_web_auth(request)):
             return r
         return await _dashboard_html(bot_ref)
+
+    @app.get("/dashboard/live")
+    async def dashboard_live(request: Request):
+        """Jonli statistika — frontend har 5s da so'raydi."""
+        if not _is_logged_in(request):
+            raise HTTPException(status_code=401, detail="login required")
+        return await _live_snapshot(bot_ref)
 
     async def _gate(request: Request):
         return _require_web_auth(request)
