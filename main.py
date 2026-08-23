@@ -195,6 +195,11 @@ class MemeBot:
 
         logger.info("[SCAN] {} ta juftlik topildi".format(len(pairs)))
 
+        n_risk_skip = 0
+        n_filter_fail = 0
+        n_ai_fail = 0
+        n_buy_attempt = 0
+
         for pair in pairs:
             token = pair.get("token", "")
             if not token:
@@ -205,7 +210,8 @@ class MemeBot:
                 token, settings.TRADE_AMOUNT_USD
             )
             if not ok:
-                logger.debug("[SKIP] {} — {}".format(pair.get("symbol", "?"), reason))
+                n_risk_skip += 1
+                logger.info("[SKIP] {} — risk: {}".format(pair.get("symbol", "?"), reason))
                 continue
 
             # Filter pipeline
@@ -213,6 +219,7 @@ class MemeBot:
                 pair, self._session
             )
             if not passed:
+                n_filter_fail += 1
                 continue
 
             # AI baholash
@@ -232,17 +239,32 @@ class MemeBot:
 
             # Threshold tekshiruvi
             if not self.scorer.passes_threshold(ai_result):
+                n_ai_fail += 1
                 history.add_rejection(
                     enriched.get("symbol", "?"), token,
                     "ai", "Score past: {:.1f}".format(ai_result.score)
                 )
+                logger.info(
+                    "[AI FAIL] {} score={:.1f} < min={:.0f}".format(
+                        enriched.get("symbol", "?"),
+                        ai_result.score,
+                        settings.AI_MIN_SCORE,
+                    )
+                )
                 continue
 
             # Xarid
+            n_buy_attempt += 1
             await self._execute_trade(token, enriched, ai_result)
 
             # Har bir juftlik o'rtasida kichik pauza
             await asyncio.sleep(0.5)
+
+        logger.info(
+            "[SCAN DONE] juftlik={} | risk_skip={} | filter_fail={} | ai_fail={} | buy_attempt={}".format(
+                len(pairs), n_risk_skip, n_filter_fail, n_ai_fail, n_buy_attempt
+            )
+        )
 
     # ─────────────── SAVDO BAJARISH ───────────────
 
