@@ -170,6 +170,27 @@ PAGE_STYLE = """
   .section.active { display: block !important; }
   .pnl-pos { color: var(--ok); font-weight: 600; }
   .pnl-neg { color: var(--bad); font-weight: 600; }
+  .pnl-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px 16px; position: relative; overflow: hidden;
+    transition: border-color .15s, transform .15s;
+  }
+  .pnl-card:hover { border-color: #2a3548; transform: translateY(-1px); }
+  .pnl-card.pos { border-color: rgba(34,197,94,.35); background: linear-gradient(145deg, rgba(34,197,94,.08), var(--card) 60%); }
+  .pnl-card.neg { border-color: rgba(239,68,68,.35); background: linear-gradient(145deg, rgba(239,68,68,.08), var(--card) 60%); }
+  .pnl-card.wait { border-color: var(--border); }
+  .pnl-card .sym { font-size: 12px; font-weight: 600; color: var(--text); letter-spacing: .02em; }
+  .pnl-card .amt { font-size: 11px; color: var(--muted); margin-left: 6px; }
+  .pnl-card .pnl-val { font-size: 22px; font-weight: 800; margin-top: 8px; letter-spacing: -0.03em; line-height: 1.1; }
+  .pnl-card .pnl-val.pos { color: #4ade80; }
+  .pnl-card .pnl-val.neg { color: #f87171; }
+  .pnl-card .pnl-val.wait { color: var(--muted); font-size: 14px; font-weight: 500; }
+  .pnl-card .pct-pill {
+    display: inline-block; margin-top: 8px; padding: 3px 10px; border-radius: 999px;
+    font-size: 12px; font-weight: 700; letter-spacing: .02em;
+  }
+  .pnl-card .pct-pill.pos { background: rgba(34,197,94,.18); color: #4ade80; }
+  .pnl-card .pct-pill.neg { background: rgba(239,68,68,.18); color: #f87171; }
   .log-line { font-family: ui-monospace, monospace; font-size: 12px; padding: 3px 0; border-bottom: 1px solid #1a1f2a; }
   @media (max-width: 900px) {
     .layout { flex-direction: column; }
@@ -501,17 +522,26 @@ async def _dashboard_html(bot_ref) -> str:
             )
 
             # Overview dagi katta kartochka
-            open_pnl_cards += f"""
-            <div class="stat" style="border-left:3px solid {card_color}">
-              <div class="label">{_esc(symbol)} · ${amount:.0f}</div>
-              <div class="value" style="font-size:20px;color:{card_color}">{arrow} ${pnl_u:+.2f}</div>
-              <div class="muted" style="margin-top:4px;font-size:12px">{pnl_pct:+.1f}% · entry ${entry:.8g} → {current_text}</div>
+            if entry > 0 and current_val > 0:
+                side = "pos" if pnl_u >= 0 else "neg"
+                sign = "+" if pnl_u >= 0 else ""
+                open_pnl_cards += f"""
+            <div class="pnl-card {side}">
+              <div><span class="sym">{_esc(symbol)}</span><span class="amt">${amount:.0f}</span></div>
+              <div class="pnl-val {side}">{sign}${abs(pnl_u):.2f}</div>
+              <span class="pct-pill {side}">{pnl_pct:+.1f}%</span>
+            </div>"""
+            else:
+                open_pnl_cards += f"""
+            <div class="pnl-card wait">
+              <div><span class="sym">{_esc(symbol)}</span><span class="amt">${amount:.0f}</span></div>
+              <div class="pnl-val wait">narx kutilmoqda…</div>
             </div>"""
 
     if not positions_rows:
         positions_rows = '<tr><td colspan="9" class="muted">Ochiq pozitsiya yo\'q</td></tr>'
     if not open_pnl_cards:
-        open_pnl_cards = '<div class="stat"><div class="label">Ochiq savdo</div><div class="value" style="font-size:14px;color:var(--muted)">Hozircha yo\'q</div></div>'
+        open_pnl_cards = '<div class="pnl-card wait"><div class="pnl-val wait">Hozircha ochiq savdo yo\'q</div></div>'
 
     u_color = "#22c55e" if unrealized_pnl >= 0 else "#ef4444"
     u_label = f"${unrealized_pnl:+.2f}" if unrealized_known else "—"
@@ -954,20 +984,26 @@ window.mbShow = function(id) {{
       if (cards) {{
         var pos = d.positions || [];
         if (!pos.length) {{
-          cards.innerHTML = '<div class="stat"><div class="label">Ochiq savdo</div><div class="value" style="font-size:14px;color:var(--muted)">Hozircha yoq</div></div>';
+          cards.innerHTML = '<div class="pnl-card wait"><div class="pnl-val wait">Hozircha ochiq savdo yo\'q</div></div>';
         }} else {{
           var html = '';
           for (var i = 0; i < pos.length; i++) {{
             var p = pos[i];
             var ok = (p.current_price || 0) > 0 && (p.entry_price || 0) > 0;
-            var col = !ok ? 'var(--muted)' : (p.pnl_usd >= 0 ? '#22c55e' : '#ef4444');
-            var arrow = !ok ? '.' : (p.pnl_usd >= 0 ? 'UP' : 'DN');
-            var pnlTxt = !ok ? 'narx...' : (arrow + ' ' + money(p.pnl_usd));
-            var pct = !ok ? '' : ((p.pnl_pct >= 0 ? '+' : '') + Number(p.pnl_pct).toFixed(1) + '%');
-            html += '<div class="stat" style="border-left:3px solid ' + col + '"><div class="label">' +
-              esc(p.symbol) + ' · $' + Number(p.amount_usd || 0).toFixed(0) +
-              '</div><div class="value" style="font-size:20px;color:' + col + '">' + pnlTxt +
-              '</div><div class="muted" style="margin-top:4px;font-size:12px">' + pct + '</div></div>';
+            var side = !ok ? 'wait' : (p.pnl_usd >= 0 ? 'pos' : 'neg');
+            var absPnl = Math.abs(Number(p.pnl_usd || 0)).toFixed(2);
+            var sign = (p.pnl_usd >= 0) ? '+' : '';
+            var pct = (p.pnl_pct >= 0 ? '+' : '') + Number(p.pnl_pct || 0).toFixed(1) + '%';
+            if (!ok) {{
+              html += '<div class="pnl-card wait"><div><span class="sym">' + esc(p.symbol) +
+                '</span><span class="amt">$' + Number(p.amount_usd || 0).toFixed(0) +
+                '</span></div><div class="pnl-val wait">narx kutilmoqda…</div></div>';
+            }} else {{
+              html += '<div class="pnl-card ' + side + '"><div><span class="sym">' + esc(p.symbol) +
+                '</span><span class="amt">$' + Number(p.amount_usd || 0).toFixed(0) +
+                '</span></div><div class="pnl-val ' + side + '">' + sign + '$' + absPnl +
+                '</div><span class="pct-pill ' + side + '">' + pct + '</span></div>';
+            }}
           }}
           cards.innerHTML = html;
         }}
