@@ -1,4 +1,6 @@
-"""Barcha sozlamalar — .env dan o'qiladi."""
+"""Barcha sozlamalar — .env dan o'qiladi.
+MEMEBOT_SETTINGS_V2 — circular import yo'q.
+"""
 from __future__ import annotations
 import os
 from pathlib import Path
@@ -25,7 +27,11 @@ def _int(val, default: int = 0) -> int:
     except (TypeError, ValueError):
         return default
 
-# .env ni yuklash
+# Platform (Railway/Docker) ENV — python ishga tushishidan oldin beriladi.
+# Ular eng yuqori ustunlikka ega (API kalitlari, PRIVATE_KEY).
+_PLATFORM_ENV_KEYS = set(os.environ.keys())
+
+# Lokal .env (faqat platformda yo'q kalitlar uchun)
 env_path = Path(__file__).resolve().parent.parent / ".env"
 if env_path.exists():
     for line in env_path.read_text(encoding="utf-8").splitlines():
@@ -34,6 +40,53 @@ if env_path.exists():
             continue
         k, _, v = line.partition("=")
         os.environ.setdefault(k.strip(), v.strip())
+
+# Doimiy ma'lumot papkasi.
+# Railway: Volume yarating, mount path = /data, sozlama: DATA_DIR=/data
+# Shunda runtime_settings, pozitsiyalar, tarix redeploydan keyin saqlanadi.
+DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
+try:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:
+    DATA_DIR = Path("data")
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+RUNTIME_SETTINGS_PATH = DATA_DIR / "runtime_settings.json"
+
+# Platform ENV da bo'lsa, runtime_settings ularni yozib yubormasin (xavfsizlik)
+_SECRET_KEYS = {
+    "PRIVATE_KEY", "TELEGRAM_BOT_TOKEN", "BIRDEYE_API_KEY", "JUPITER_API_KEY",
+    "HELIUS_API_KEY", "OPENAI_API_KEY", "X_API_BEARER_TOKEN", "ADMIN_API_KEY",
+    "ADMIN_PASSWORD", "ADMIN_SESSION_SECRET", "EMAIL_PASSWORD",
+}
+
+
+def _load_runtime_overrides() -> None:
+    """Admin panel saqlagan sozlamalar (volume).
+    Ustunlik: 1) Platform ENV (Railway Variables)
+              2) runtime_settings.json
+              3) .env / default
+    """
+    if not RUNTIME_SETTINGS_PATH.exists():
+        return
+    try:
+        import json
+        data = json.loads(RUNTIME_SETTINGS_PATH.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return
+        for k, v in data.items():
+            if v is None:
+                continue
+            key = str(k)
+            # Platform tomonidan berilgan kalitni o'zgartirmaymiz
+            if key in _PLATFORM_ENV_KEYS and os.environ.get(key, "") != "":
+                continue
+            os.environ[key] = str(v)
+    except Exception:
+        pass
+
+
+_load_runtime_overrides()
 
 g = os.environ.get
 
@@ -74,6 +127,10 @@ class Settings:
     MAX_DAILY_TRADES: int = _int(g("MAX_DAILY_TRADES"), 50)
     SLIPPAGE_BPS: int = _int(g("SLIPPAGE_BPS"), 300)
     PRIORITY_FEE_MICROLAMPORTS: int = _int(g("PRIORITY_FEE_MICROLAMPORTS"), 50000)
+    # Phantom/Solana: buy+sell gas + priority + ATA (taxminan)
+    # Sof PnL = gross - max(FEE_USD_ROUNDTRIP, amount * FEE_PCT_ROUNDTRIP)
+    FEE_USD_ROUNDTRIP: float = _float(g("FEE_USD_ROUNDTRIP"), 0.25)
+    FEE_PCT_ROUNDTRIP: float = _float(g("FEE_PCT_ROUNDTRIP"), 0.02)
     SELL_RETRY_ATTEMPTS: int = _int(g("SELL_RETRY_ATTEMPTS"), 3)
     PARTIAL_TP_ENABLED: bool = _bool(g("PARTIAL_TP_ENABLED"), False)
     PARTIAL_TP_PCT: float = _float(g("PARTIAL_TP_PCT"), 0.5)
@@ -199,4 +256,36 @@ class Settings:
         return {k: getattr(self, k) for k in dir(self)
                 if not k.startswith("_") and not callable(getattr(self, k))}
 
+
+def persist_runtime_setting(key: str, value) -> None:
+    """Admin panel o'zgarishini DATA_DIR/runtime_settings.json ga yozadi.
+    Railway da Volume (/data) bo'lmasa redeployda yo'qoladi.
+    SECRET kalitlarni afzal Railway Variables da saqlang.
+    """
+    import json
+    try:
+        RUNTIME_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if RUNTIME_SETTINGS_PATH.exists():
+            try:
+                data = json.loads(RUNTIME_SETTINGS_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
+        if isinstance(value, bool):
+            stored = "true" if value else "false"
+        else:
+            stored = value
+        data[str(key)] = stored
+        tmp = RUNTIME_SETTINGS_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, RUNTIME_SETTINGS_PATH)
+        os.environ[str(key)] = str(stored)
+    except Exception:
+        pass
+
+
 settings = Settings()
+# data papkasini settings orqali ham ko'rsatish
+settings.DATA_DIR = str(DATA_DIR)  # type: ignore
