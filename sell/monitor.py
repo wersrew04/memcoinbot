@@ -8,7 +8,7 @@ import asyncio
 import aiohttp
 from typing import Dict, Optional
 from utils.logger import logger
-from utils.helpers import safe_float, pnl_percent, pnl_usd, utc_now
+from utils.helpers import safe_float, pnl_percent, pnl_usd, net_pnl_usd, net_pnl_percent, roundtrip_fee_usd, utc_now
 from utils.history import history
 from config.settings import settings
 
@@ -72,7 +72,8 @@ class PositionMonitor:
 
         amount_usd = safe_float(pos.get("amount_usd"))
         symbol = pos.get("symbol", token[:8])
-        pnl_pct = pnl_percent(entry, price)
+        # Sof % (komissiya ayirilgan) — TP/SL shu asosda
+        pnl_pct = net_pnl_percent(amount_usd, entry, price)
 
         # Trailing high yangilash
         high_price = safe_float(pos.get("high_price", entry))
@@ -114,8 +115,11 @@ class PositionMonitor:
         amount_usd = safe_float(pos.get("amount_usd"))
         is_paper = pos.get("paper", True)
 
-        pnl_pct_val = pnl_percent(entry, price)
-        pnl_usd_val = pnl_usd(amount_usd, entry, price)
+        # Sof PnL: gross - round-trip fee (Phantom/Solana)
+        fee = roundtrip_fee_usd(amount_usd)
+        gross_usd = pnl_usd(amount_usd, entry, price)
+        pnl_usd_val = gross_usd - fee
+        pnl_pct_val = (pnl_usd_val / amount_usd * 100.0) if amount_usd > 0 else 0.0
 
         sell_ok = True
         tx_hash = "PAPER"
