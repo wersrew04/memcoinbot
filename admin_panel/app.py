@@ -384,11 +384,31 @@ async def _dashboard_html(bot_ref) -> str:
     if bot_ref and hasattr(bot_ref, "advanced_risk"):
         adv = bot_ref.advanced_risk.status()
 
+    # Hamyon balansi (web da ko'rinishi uchun)
+    wallet_pubkey = ""
+    wallet_sol = 0.0
+    wallet_sol_usd = 0.0
+    wallet_err = ""
+    try:
+        from wallet.keypair import get_pubkey, get_sol_balance, get_sol_price_usd
+        wallet_pubkey = get_pubkey() or ""
+        if wallet_pubkey and bot_ref and getattr(bot_ref, "_session", None):
+            wallet_sol = await get_sol_balance(bot_ref._session, wallet_pubkey)
+            sol_px = await get_sol_price_usd(bot_ref._session)
+            wallet_sol_usd = wallet_sol * sol_px
+        elif not wallet_pubkey:
+            wallet_err = "PRIVATE_KEY o'rnatilmagan"
+        else:
+            wallet_err = "Session yo'q"
+    except Exception as e:
+        wallet_err = str(e)[:80]
+
     def fv(name, default=0):
         return getattr(settings, name, default)
 
     net_color = "#22c55e" if pnl["net_pnl"] >= 0 else "#ef4444"
     emerg_badge = _bool_badge(not emergency, "SAFE", "EMERGENCY") if not emergency else '<span class="badge off">EMERGENCY</span>'
+    wallet_short = (wallet_pubkey[:6] + "…" + wallet_pubkey[-4:]) if len(wallet_pubkey) > 12 else (wallet_pubkey or "—")
 
 
     # Masked secrets for API form placeholders
@@ -432,6 +452,18 @@ async def _dashboard_html(bot_ref) -> str:
       <div class="stat"><div class="label">Win rate</div><div class="value" style="font-size:16px">{pnl['win_rate']}%</div></div>
       <div class="stat"><div class="label">Trades</div><div class="value">{pnl['total_trades']}</div></div>
       <div class="stat"><div class="label">Trade $</div><div class="value" style="font-size:16px">${settings.TRADE_AMOUNT_USD:.0f}</div></div>
+      <div class="stat"><div class="label">SOL balans</div><div class="value" style="font-size:16px">{wallet_sol:.4f}</div></div>
+      <div class="stat"><div class="label">SOL ≈ USD</div><div class="value" style="font-size:16px">${wallet_sol_usd:.2f}</div></div>
+    </div>
+    <div class="card">
+      <h2>👛 Hamyon</h2>
+      <div class="grid">
+        <div class="stat"><div class="label">Pubkey</div><div class="value" style="font-size:13px;font-family:monospace">{_esc(wallet_short)}</div></div>
+        <div class="stat"><div class="label">SOL</div><div class="value" style="font-size:16px">{wallet_sol:.6f}</div></div>
+        <div class="stat"><div class="label">≈ USD</div><div class="value" style="font-size:16px">${wallet_sol_usd:.2f}</div></div>
+        <div class="stat"><div class="label">Holat</div><div class="value" style="font-size:13px">{'✅ ulangan' if wallet_pubkey and not wallet_err else _esc(wallet_err or 'ulangan emas')}</div></div>
+      </div>
+      <p class="muted" style="margin-top:10px;font-size:12px">To'liq manzil: <code class="mono">{_esc(wallet_pubkey or '—')}</code></p>
     </div>
     <div class="card">
       <h2>Tezkor boshqaruv</h2>
