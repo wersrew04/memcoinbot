@@ -137,8 +137,8 @@ PAGE_STYLE = """
   .login-wrap { max-width: 380px; margin: 12vh auto; }
   .login-wrap .card { padding: 28px; }
   form.inline { display: inline; }
-  .section { display: none; }
-  .section.active { display: block; }
+  .section { display: none !important; }
+  .section.active { display: block !important; }
   .pnl-pos { color: var(--ok); font-weight: 600; }
   .pnl-neg { color: var(--bad); font-weight: 600; }
   .log-line { font-family: ui-monospace, monospace; font-size: 12px; padding: 3px 0; border-bottom: 1px solid #1a1f2a; }
@@ -224,7 +224,7 @@ def _sidebar(active: str = "overview") -> str:
         ("control", "Control"),
     ]
     links = "".join(
-        f'<a href="/#{k}" class="{"active" if k == active else ""}" data-section="{k}">{label}</a>'
+        f'<a href="#{k}" class="{"active" if k == active else ""}" data-section="{k}" role="button">{label}</a>'
         for k, label in items
     )
     return f"""
@@ -828,54 +828,72 @@ async def _dashboard_html(bot_ref) -> str:
   </section>
 </main></div>
 <script>
-(function(){{
-  function show(id){{
-    document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
-    document.querySelectorAll('.nav a').forEach(a => a.classList.remove('active'));
-    const sec = document.getElementById('sec-' + id);
-    if (sec) sec.classList.add('active');
-    const link = document.querySelector('.nav a[data-section="'+id+'"]');
-    if (link) link.classList.add('active');
-  }}
-  document.querySelectorAll('.nav a[data-section]').forEach(a => {{
-    a.addEventListener('click', function(e){{
+/* --- NAV: alohida, poll xatosidan mustaqil --- */
+function memebotShowSection(id) {{
+  if (!id) id = 'overview';
+  document.querySelectorAll('.section').forEach(function(s) {{
+    s.classList.remove('active');
+  }});
+  document.querySelectorAll('.nav a[data-section]').forEach(function(a) {{
+    a.classList.remove('active');
+  }});
+  var sec = document.getElementById('sec-' + id);
+  if (sec) sec.classList.add('active');
+  var link = document.querySelector('.nav a[data-section="' + id + '"]');
+  if (link) link.classList.add('active');
+  try {{ history.replaceState(null, '', '#' + id); }} catch (e) {{}}
+}}
+
+document.addEventListener('DOMContentLoaded', function() {{
+  document.querySelectorAll('.nav a[data-section]').forEach(function(a) {{
+    a.addEventListener('click', function(e) {{
       e.preventDefault();
-      const id = this.getAttribute('data-section');
-      history.replaceState(null, '', '#' + id);
-      show(id);
+      e.stopPropagation();
+      var id = this.getAttribute('data-section');
+      memebotShowSection(id);
+      return false;
     }});
   }});
-  show((location.hash || '#overview').replace('#','') || 'overview');
+  var initial = (location.hash || '#overview').replace('#', '') || 'overview';
+  memebotShowSection(initial);
+}});
 
-  function money(n, d){{
+/* --- LIVE STATS --- */
+(function() {{
+  function money(n, d) {{
     if (n === null || n === undefined || isNaN(n)) return '—';
-    const x = Number(n);
-    const s = (x >= 0 ? '+' : '') + x.toFixed(d === undefined ? 2 : d);
+    var x = Number(n);
+    var s = (x >= 0 ? '+' : '') + x.toFixed(d === undefined ? 2 : d);
     return '$' + s;
   }}
-  function esc(s){{
-    return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  function esc(s) {{
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
   }}
-  function setTxt(id, v){{
-    const el = document.getElementById(id);
+  function setTxt(id, v) {{
+    var el = document.getElementById(id);
     if (el) el.textContent = v;
   }}
-  function setColor(id, color){{
-    const el = document.getElementById(id);
+  function setColor(id, color) {{
+    var el = document.getElementById(id);
     if (el) el.style.color = color;
   }}
 
-  async function poll(){{
-    const dot = document.getElementById('live-dot');
+  async function poll() {{
+    var dot = document.getElementById('live-dot');
     try {{
-      const r = await fetch('/dashboard/live', {{credentials: 'same-origin', cache: 'no-store'}});
+      var r = await fetch('/dashboard/live', {{ credentials: 'same-origin', cache: 'no-store' }});
       if (!r.ok) {{
         if (dot) dot.style.background = '#ef4444';
         return;
       }}
-      const d = await r.json();
-      if (dot) {{ dot.style.background = '#22c55e'; dot.style.boxShadow = '0 0 6px #22c55e'; }}
-      const ts = document.getElementById('live-ts');
+      var d = await r.json();
+      if (dot) {{
+        dot.style.background = '#22c55e';
+        dot.style.boxShadow = '0 0 6px #22c55e';
+      }}
+      var ts = document.getElementById('live-ts');
       if (ts) ts.textContent = 'yangilandi ' + new Date().toLocaleTimeString();
 
       setTxt('st-bot', d.running ? '✅' : '🛑');
@@ -895,62 +913,65 @@ async def _dashboard_html(bot_ref) -> str:
       setTxt('st-trade$', '$' + Number(d.trade_amount || 0).toFixed(0));
       setTxt('st-sol', Number(d.wallet_sol || 0).toFixed(4));
       setTxt('st-solusd', '$' + Number(d.wallet_usd || 0).toFixed(2));
-
       setTxt('tr-net', money(d.net_pnl));
       setTxt('tr-profit', '$' + Number(d.profit || 0).toFixed(2));
       setTxt('tr-loss', '$' + Number(d.loss || 0).toFixed(2));
       setTxt('tr-bw', money(d.best) + ' / ' + money(d.worst));
 
-      const badges = document.getElementById('top-badges');
+      var badges = document.getElementById('top-badges');
       if (badges) {{
-        const b = (on, onT, offT) => on
-          ? '<span class="badge on">' + onT + '</span>'
-          : '<span class="badge off">' + offT + '</span>';
-        badges.innerHTML = b(d.running,'RUNNING','STOPPED') + ' ' +
-          b(d.paper,'PAPER','LIVE') + ' ' +
-          (d.emergency ? '<span class="badge off">EMERGENCY</span>' : '<span class="badge on">SAFE</span>');
+        function b(on, onT, offT) {{
+          return on
+            ? '<span class="badge on">' + onT + '</span>'
+            : '<span class="badge off">' + offT + '</span>';
+        }}
+        badges.innerHTML = b(d.running, 'RUNNING', 'STOPPED') + ' ' +
+          b(d.paper, 'PAPER', 'LIVE') + ' ' +
+          (d.emergency
+            ? '<span class="badge off">EMERGENCY</span>'
+            : '<span class="badge on">SAFE</span>');
       }}
 
-      const cards = document.getElementById('open-pnl-cards');
+      var cards = document.getElementById('open-pnl-cards');
       if (cards) {{
-        const pos = d.positions || [];
+        var pos = d.positions || [];
         if (!pos.length) {{
           cards.innerHTML = '<div class="stat"><div class="label">Ochiq savdo</div><div class="value" style="font-size:14px;color:var(--muted)">Hozircha yo\'q</div></div>';
         }} else {{
-          cards.innerHTML = pos.map(p => {{
-            const ok = (p.current_price || 0) > 0 && (p.entry_price || 0) > 0;
-            const col = !ok ? 'var(--muted)' : (p.pnl_usd >= 0 ? '#22c55e' : '#ef4444');
-            const arrow = !ok ? '·' : (p.pnl_usd >= 0 ? '▲' : '▼');
-            const pnlTxt = !ok ? 'narx kutilmoqda...' : (arrow + ' ' + money(p.pnl_usd));
-            const pct = !ok ? '' : (p.pnl_pct >= 0 ? '+' : '') + Number(p.pnl_pct).toFixed(1) + '%';
-            const cur = (p.current_price || 0) > 0 ? ('$' + Number(p.current_price).toPrecision(6)) : '—';
+          cards.innerHTML = pos.map(function(p) {{
+            var ok = (p.current_price || 0) > 0 && (p.entry_price || 0) > 0;
+            var col = !ok ? 'var(--muted)' : (p.pnl_usd >= 0 ? '#22c55e' : '#ef4444');
+            var arrow = !ok ? '·' : (p.pnl_usd >= 0 ? '▲' : '▼');
+            var pnlTxt = !ok ? 'narx kutilmoqda...' : (arrow + ' ' + money(p.pnl_usd));
+            var pct = !ok ? '' : (p.pnl_pct >= 0 ? '+' : '') + Number(p.pnl_pct).toFixed(1) + '%';
+            var cur = (p.current_price || 0) > 0 ? ('$' + Number(p.current_price).toPrecision(6)) : '—';
             return '<div class="stat" style="border-left:3px solid ' + col + '">' +
-              '<div class="label">' + esc(p.symbol) + ' · $' + Number(p.amount_usd||0).toFixed(0) + '</div>' +
+              '<div class="label">' + esc(p.symbol) + ' · $' + Number(p.amount_usd || 0).toFixed(0) + '</div>' +
               '<div class="value" style="font-size:20px;color:' + col + '">' + pnlTxt + '</div>' +
               '<div class="muted" style="margin-top:4px;font-size:12px">' + pct +
-              ' · entry $' + Number(p.entry_price||0).toPrecision(6) + ' → ' + cur + '</div></div>';
+              ' · entry $' + Number(p.entry_price || 0).toPrecision(6) + ' → ' + cur + '</div></div>';
           }}).join('');
         }}
       }}
 
-      const tbody = document.getElementById('positions-tbody');
+      var tbody = document.getElementById('positions-tbody');
       if (tbody) {{
-        const pos = d.positions || [];
-        if (!pos.length) {{
+        var pos2 = d.positions || [];
+        if (!pos2.length) {{
           tbody.innerHTML = '<tr><td colspan="9" class="muted">Ochiq pozitsiya yo\'q</td></tr>';
         }} else {{
-          tbody.innerHTML = pos.map(p => {{
-            const ok = (p.current_price || 0) > 0 && (p.entry_price || 0) > 0;
-            const cls = !ok ? 'muted' : (p.pnl_usd >= 0 ? 'pnl-pos' : 'pnl-neg');
-            const arrow = !ok ? '' : (p.pnl_usd >= 0 ? '▲ ' : '▼ ');
-            const pnl = !ok ? 'narx kutilmoqda...' :
+          tbody.innerHTML = pos2.map(function(p) {{
+            var ok = (p.current_price || 0) > 0 && (p.entry_price || 0) > 0;
+            var cls = !ok ? 'muted' : (p.pnl_usd >= 0 ? 'pnl-pos' : 'pnl-neg');
+            var arrow = !ok ? '' : (p.pnl_usd >= 0 ? '▲ ' : '▼ ');
+            var pnl = !ok ? 'narx kutilmoqda...' :
               (arrow + money(p.pnl_usd) + ' (' + (p.pnl_pct >= 0 ? '+' : '') + Number(p.pnl_pct).toFixed(1) + '%)');
-            const cur = ok ? ('$' + Number(p.current_price).toFixed(8)) : '—';
-            const tok = esc(p.token || '');
+            var cur = ok ? ('$' + Number(p.current_price).toFixed(8)) : '—';
+            var tok = esc(p.token || '');
             return '<tr><td><strong>' + esc(p.symbol) + '</strong></td>' +
-              '<td class="mono">' + tok.slice(0,12) + '…</td>' +
-              '<td>$' + Number(p.amount_usd||0).toFixed(2) + '</td>' +
-              '<td class="mono">$' + Number(p.entry_price||0).toFixed(8) + '</td>' +
+              '<td class="mono">' + tok.slice(0, 12) + '…</td>' +
+              '<td>$' + Number(p.amount_usd || 0).toFixed(2) + '</td>' +
+              '<td class="mono">$' + Number(p.entry_price || 0).toFixed(8) + '</td>' +
               '<td class="mono">' + cur + '</td>' +
               '<td class="' + cls + '" style="font-weight:700;font-size:15px">' + pnl + '</td>' +
               '<td>' + esc(p.ai_score != null ? p.ai_score : '—') + '</td>' +
@@ -966,8 +987,12 @@ async def _dashboard_html(bot_ref) -> str:
       console.warn('live poll', e);
     }}
   }}
-  poll();
-  setInterval(poll, 5000);
+  if (document.readyState === 'loading') {{
+    document.addEventListener('DOMContentLoaded', function() {{ poll(); setInterval(poll, 5000); }});
+  }} else {{
+    poll();
+    setInterval(poll, 5000);
+  }}
 }})();
 </script></script>
 </body></html>"""
