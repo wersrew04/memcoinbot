@@ -65,77 +65,106 @@ def _require_web_auth(request: Request) -> Optional[RedirectResponse]:
 PAGE_STYLE = """
 <style>
   :root {
-    --bg: #0b0e14; --panel: #12161f; --card: #181d28; --border: #252b38;
-    --text: #e8eaed; --muted: #8b95a8; --accent: #3b82f6;
-    --ok: #22c55e; --bad: #ef4444; --warn: #f59e0b; --radius: 12px;
+    --bg: #070a10; --panel: #0e1219; --card: #141a24; --card-hover: #1a2230;
+    --border: #1e2636; --text: #eef0f4; --muted: #8892a4;
+    --accent: #3b82f6; --accent-glow: rgba(59,130,246,.25);
+    --ok: #22c55e; --bad: #ef4444; --warn: #f59e0b; --radius: 14px;
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
     font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 14px; line-height: 1.45;
+    font-size: 14px; line-height: 1.5;
+    background-image: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(59,130,246,.12), transparent);
   }
   a { color: #60a5fa; text-decoration: none; }
-  a:hover { text-decoration: underline; }
+  a:hover { text-decoration: underline; color: #93c5fd; }
   .layout { display: flex; min-height: 100vh; }
   .sidebar {
-    width: 220px; background: var(--panel); border-right: 1px solid var(--border);
-    padding: 20px 14px; position: sticky; top: 0; height: 100vh; flex-shrink: 0;
+    width: 230px; background: linear-gradient(180deg, var(--panel) 0%, #0a0e15 100%);
+    border-right: 1px solid var(--border);
+    padding: 22px 14px; position: sticky; top: 0; height: 100vh; flex-shrink: 0;
   }
-  .sidebar .logo { font-weight: 700; font-size: 16px; margin-bottom: 24px; }
+  .sidebar .logo {
+    font-weight: 800; font-size: 17px; margin-bottom: 28px;
+    letter-spacing: -0.02em; display: flex; align-items: center; gap: 8px;
+  }
   .sidebar .logo span { color: var(--accent); }
   .nav a {
-    display: block; padding: 9px 12px; border-radius: 8px; color: var(--muted);
-    margin-bottom: 4px; text-decoration: none; font-weight: 500;
+    display: block; padding: 10px 14px; border-radius: 10px; color: var(--muted);
+    margin-bottom: 3px; text-decoration: none; font-weight: 500; transition: all .15s ease;
   }
-  .nav a:hover, .nav a.active { background: var(--card); color: var(--text); text-decoration: none; }
-  .main { flex: 1; padding: 20px 24px 60px; max-width: 1200px; }
-  .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-  .topbar h1 { margin: 0; font-size: 20px; font-weight: 600; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
+  .nav a:hover { background: var(--card); color: var(--text); text-decoration: none; }
+  .nav a.active {
+    background: linear-gradient(135deg, rgba(59,130,246,.2), rgba(59,130,246,.08));
+    color: #93c5fd; border: 1px solid rgba(59,130,246,.25); text-decoration: none;
+  }
+  .main { flex: 1; padding: 24px 28px 70px; max-width: 1280px; }
+  .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 22px; }
+  .topbar h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 12px; margin-bottom: 18px; }
   .stat {
     background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 14px 16px;
+    padding: 14px 16px; transition: border-color .15s, transform .15s;
   }
-  .stat .label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
-  .stat .value { font-size: 20px; font-weight: 700; margin-top: 4px; }
+  .stat:hover { border-color: #2a3548; }
+  .stat .label { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); font-weight: 500; }
+  .stat .value { font-size: 20px; font-weight: 700; margin-top: 6px; letter-spacing: -0.02em; }
   .card {
     background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 16px 18px; margin-bottom: 16px;
+    padding: 18px 20px; margin-bottom: 16px;
+    box-shadow: 0 1px 0 rgba(255,255,255,.03) inset;
   }
   .card h2 {
-    margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .05em;
+    margin: 0 0 14px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
     color: var(--muted); font-weight: 600;
   }
   .badge {
-    display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    display: inline-block; padding: 3px 11px; border-radius: 999px; font-size: 11px; font-weight: 600;
   }
-  .badge.on { background: #14532d; color: #4ade80; }
-  .badge.off { background: #450a0a; color: #fca5a5; }
+  .badge.on { background: rgba(34,197,94,.15); color: #4ade80; border: 1px solid rgba(34,197,94,.3); }
+  .badge.off { background: rgba(239,68,68,.12); color: #fca5a5; border: 1px solid rgba(239,68,68,.25); }
   button, .btn {
-    background: var(--accent); color: #fff; border: none; padding: 8px 14px; border-radius: 8px;
+    background: var(--accent); color: #fff; border: none; padding: 8px 14px; border-radius: 9px;
     cursor: pointer; font-size: 13px; font-weight: 500; margin: 3px 4px 3px 0;
+    transition: filter .15s, box-shadow .15s;
   }
-  button:hover { filter: brightness(1.08); }
+  button:hover { filter: brightness(1.1); box-shadow: 0 0 0 3px var(--accent-glow); }
   button.stop { background: var(--bad); }
+  button.stop:hover { box-shadow: 0 0 0 3px rgba(239,68,68,.25); }
   button.warn { background: var(--warn); color: #111; }
-  button.ghost { background: #2a3140; }
+  button.ghost { background: #1e2636; color: var(--text); }
+  button.ghost:hover { background: #2a3548; box-shadow: none; }
   button.ok { background: var(--ok); color: #052e16; }
+  button.copy-btn {
+    background: #1e2636; color: var(--muted); padding: 2px 8px; font-size: 10px;
+    margin: 0 0 0 6px; border-radius: 6px; vertical-align: middle;
+  }
+  button.copy-btn:hover { color: var(--text); background: #2a3548; box-shadow: none; }
   input[type=text], input[type=password], input[type=number] {
     background: var(--bg); border: 1px solid var(--border); color: var(--text);
-    padding: 8px 10px; border-radius: 8px; width: 100%; font-size: 13px;
+    padding: 9px 12px; border-radius: 9px; width: 100%; font-size: 13px;
+    transition: border-color .15s;
   }
+  input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
   label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
   .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
   .form-row { margin-bottom: 4px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
-  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  tr:hover td { background: rgba(255,255,255,.015); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
+  .token-full {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px; word-break: break-all; max-width: 280px; line-height: 1.4;
+    color: #a5b4c8;
+  }
+  .token-full a { color: #60a5fa; }
   .muted { color: var(--muted); }
   .bad-t { color: var(--bad); }
-  .login-wrap { max-width: 380px; margin: 12vh auto; }
-  .login-wrap .card { padding: 28px; }
+  .login-wrap { max-width: 400px; margin: 14vh auto; }
+  .login-wrap .card { padding: 32px; box-shadow: 0 20px 50px rgba(0,0,0,.4); }
   form.inline { display: inline; }
   .section { display: none !important; }
   .section.active { display: block !important; }
@@ -146,6 +175,7 @@ PAGE_STYLE = """
     .layout { flex-direction: column; }
     .sidebar { width: 100%; height: auto; position: relative; }
     .nav { display: flex; flex-wrap: wrap; gap: 4px; }
+    .token-full { max-width: 160px; }
   }
 </style>
 """
@@ -452,9 +482,13 @@ async def _dashboard_html(bot_ref) -> str:
                 pnl_u = 0.0
                 arrow = "·"
 
+            tok_esc = _esc(token)
             positions_rows += (
                 f"<tr><td><strong>{_esc(symbol)}</strong></td>"
-                f"<td class='mono'>{_esc(token)[:12]}…</td>"
+                f"<td><div class='token-full'>"
+                f"<a href='https://solscan.io/token/{tok_esc}' target='_blank' rel='noopener' title='Solscan'>{tok_esc}</a>"
+                f"<button type='button' class='copy-btn' onclick=\"navigator.clipboard.writeText('{tok_esc}');this.textContent='✓';setTimeout(()=>this.textContent='Copy',1200)\">Copy</button>"
+                f"</div></td>"
                 f"<td>${amount:.2f}</td>"
                 f"<td class='mono'>${entry:.8f}</td>"
                 f"<td class='mono'>{current_text}</td>"
@@ -462,7 +496,7 @@ async def _dashboard_html(bot_ref) -> str:
                 f"<td>{_esc(pos.get('ai_score', '—'))}</td>"
                 f"<td class='muted'>{'PAPER' if pos.get('paper') else 'LIVE'}</td>"
                 f"<td><form class='inline' method='post' action='/dashboard/positions/close' onsubmit=\"return confirm('Pozitsiyani yopishni tasdiqlaysizmi?');\">"
-                f"<input type='hidden' name='token' value='{_esc(token)}'>"
+                f"<input type='hidden' name='token' value='{tok_esc}'>"
                 f"<button class='stop' type='submit' style='padding:4px 8px;font-size:11px'>Yopish</button></form></td></tr>"
             )
 
@@ -505,7 +539,7 @@ async def _dashboard_html(bot_ref) -> str:
         rej_rows += (
             f"<tr><td class='muted mono'>{_esc(str(r.get('ts',''))[:19])}</td>"
             f"<td>{_esc(r.get('symbol'))}</td>"
-            f"<td class='mono'>{_esc(r.get('token',''))[:10]}…</td>"
+            f"<td class='token-full' title='{_esc(r.get('token',''))}'>{_esc(r.get('token',''))}</td>"
             f"<td>{_esc(r.get('stage'))}</td>"
             f"<td class='muted'>{_esc(r.get('last_reason'))}</td></tr>"
         )
@@ -952,8 +986,11 @@ window.mbShow = function(id) {{
             var pnl2 = !ok2 ? '...' : money(p2.pnl_usd) + ' (' + Number(p2.pnl_pct).toFixed(1) + '%)';
             var cur2 = ok2 ? ('$' + Number(p2.current_price).toFixed(8)) : '-';
             var tok = esc(p2.token || '');
-            rows += '<tr><td><strong>' + esc(p2.symbol) + '</strong></td><td class="mono">' +
-              tok.slice(0,12) + '...</td><td>$' + Number(p2.amount_usd||0).toFixed(2) +
+            var copyOnclick = "navigator.clipboard.writeText('" + tok + "');this.textContent='✓';setTimeout(function(){{this.textContent='Copy';}}.bind(this),1200)";
+            rows += '<tr><td><strong>' + esc(p2.symbol) + '</strong></td><td><div class="token-full">' +
+              '<a href="https://solscan.io/token/' + tok + '" target="_blank" rel="noopener" title="Solscan">' + tok + '</a>' +
+              '<button type="button" class="copy-btn" onclick="' + copyOnclick + '">Copy</button>' +
+              '</div></td><td>$' + Number(p2.amount_usd||0).toFixed(2) +
               '</td><td class="mono">$' + Number(p2.entry_price||0).toFixed(8) +
               '</td><td class="mono">' + cur2 + '</td><td class="' + cls + '" style="font-weight:700">' +
               pnl2 + '</td><td>' + esc(p2.ai_score != null ? p2.ai_score : '-') +
@@ -972,7 +1009,7 @@ window.mbShow = function(id) {{
   }}
   setTimeout(function() {{ poll(); setInterval(poll, 5000); }}, 500);
 }})();
-</script></script>
+</script>
 </body></html>"""
 
 
