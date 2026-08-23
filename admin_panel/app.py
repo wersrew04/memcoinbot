@@ -132,6 +132,7 @@ PAGE_STYLE = """
     padding: 10px 14px; border-radius: 12px; color: var(--muted);
     margin-bottom: 2px; text-decoration: none; font-weight: 500;
     font-size: 13.5px; transition: all .18s ease;
+    cursor: pointer; user-select: none; border: 1px solid transparent;
   }
   .nav a:hover {
     background: rgba(255,255,255,.04); color: var(--text); text-decoration: none;
@@ -455,8 +456,7 @@ def _sidebar(active: str = "overview") -> str:
     # onclick — listener ishlamasa ham menyu almashtadi
     links = "".join(
         (
-            '<a href="#{k}" class="{cls}" data-section="{k}" '
-            'onclick="return window.mbShow && window.mbShow(\'{k}\')">{label}</a>'
+            '<a href="#{k}" class="{cls}" data-section="{k}" role="button">{label}</a>'
         ).format(
             k=k,
             cls=("active" if k == active else ""),
@@ -1081,33 +1081,50 @@ async def _dashboard_html(bot_ref) -> str:
 window.mbShow = function(id) {{
   try {{
     if (!id) id = 'overview';
+    id = String(id).replace(/^#/, '');
     var sections = document.querySelectorAll('.section');
     for (var i = 0; i < sections.length; i++) {{
       sections[i].classList.remove('active');
-      sections[i].style.display = 'none';
     }}
     var sec = document.getElementById('sec-' + id);
-    if (sec) {{
-      sec.classList.add('active');
-      sec.style.display = 'block';
+    if (!sec) {{
+      id = 'overview';
+      sec = document.getElementById('sec-overview');
     }}
+    if (sec) sec.classList.add('active');
     var links = document.querySelectorAll('.nav a[data-section]');
     for (var j = 0; j < links.length; j++) {{
-      links[j].classList.remove('active');
-      if (links[j].getAttribute('data-section') === id) {{
-        links[j].classList.add('active');
-      }}
+      var isOn = links[j].getAttribute('data-section') === id;
+      if (isOn) links[j].classList.add('active');
+      else links[j].classList.remove('active');
     }}
     try {{ history.replaceState(null, '', '#' + id); }} catch (e1) {{}}
-  }} catch (e2) {{ console.error(e2); }}
+  }} catch (e2) {{ console.error('mbShow', e2); }}
   return false;
 }};
 (function() {{
-  var hash = (location.hash || '#overview').replace('#', '') || 'overview';
-  if (document.readyState === 'loading') {{
-    document.addEventListener('DOMContentLoaded', function() {{ window.mbShow(hash); }});
-  }} else {{
+  function boot() {{
+    var hash = (location.hash || '#overview').replace('#', '') || 'overview';
     window.mbShow(hash);
+    // Sidebar clicks — event delegation (inline onclick shart emas)
+    var nav = document.querySelector('.nav');
+    if (nav) {{
+      nav.addEventListener('click', function(ev) {{
+        var a = ev.target.closest ? ev.target.closest('a[data-section]') : null;
+        if (!a) return;
+        ev.preventDefault();
+        window.mbShow(a.getAttribute('data-section'));
+      }});
+    }}
+    window.addEventListener('hashchange', function() {{
+      var h = (location.hash || '#overview').replace('#', '') || 'overview';
+      window.mbShow(h);
+    }});
+  }}
+  if (document.readyState === 'loading') {{
+    document.addEventListener('DOMContentLoaded', boot);
+  }} else {{
+    boot();
   }}
 }})();
 
