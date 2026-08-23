@@ -278,7 +278,7 @@ def _read_log_tail(n: int = 80) -> List[str]:
 
 async def _live_snapshot(bot_ref) -> dict:
     """Dashboard uchun jonli statistika (JSON)."""
-    from utils.helpers import pnl_percent, pnl_usd as calc_pnl_usd
+    from utils.helpers import pnl_percent, pnl_usd as calc_pnl_usd, net_pnl_usd, net_pnl_percent, roundtrip_fee_usd
 
     running = settings.BOT_RUNNING
     paper = settings.PAPER_TRADING
@@ -319,8 +319,8 @@ async def _live_snapshot(bot_ref) -> dict:
             except (TypeError, ValueError):
                 current = 0.0
             if entry > 0 and current > 0:
-                pct = pnl_percent(entry, current)
-                usd = calc_pnl_usd(amount, entry, current)
+                pct = net_pnl_percent(amount, entry, current)
+                usd = net_pnl_usd(amount, entry, current)
                 unrealized += usd
                 known += 1
             else:
@@ -421,7 +421,7 @@ async def _dashboard_html(bot_ref) -> str:
 
         open_count = summary.get("open_positions", len(positions))
         daily_loss = summary.get("daily_loss_usd", 0.0)
-        from utils.helpers import pnl_percent, pnl_usd as calc_pnl_usd
+        from utils.helpers import pnl_percent, pnl_usd as calc_pnl_usd, net_pnl_usd, net_pnl_percent, roundtrip_fee_usd
 
         for token, pos in positions.items():
             entry = float(pos.get("entry_price") or 0)
@@ -703,6 +703,8 @@ async def _dashboard_html(bot_ref) -> str:
           <div class="form-row"><label>STOP_LOSS_PCT</label><input type="number" step="0.01" name="STOP_LOSS_PCT" value="{fv('STOP_LOSS_PCT')}"></div>
           <div class="form-row"><label>TAKE_PROFIT_PCT</label><input type="number" step="0.01" name="TAKE_PROFIT_PCT" value="{fv('TAKE_PROFIT_PCT')}"></div>
           <div class="form-row"><label>TRAILING_STOP_PCT</label><input type="number" step="0.01" name="TRAILING_STOP_PCT" value="{fv('TRAILING_STOP_PCT')}"></div>
+          <div class="form-row"><label>FEE_USD_ROUNDTRIP</label><input type="number" step="0.01" name="FEE_USD_ROUNDTRIP" value="{fv('FEE_USD_ROUNDTRIP', 0.25)}"></div>
+          <div class="form-row"><label>FEE_PCT_ROUNDTRIP</label><input type="number" step="0.005" name="FEE_PCT_ROUNDTRIP" value="{fv('FEE_PCT_ROUNDTRIP', 0.02)}"></div>
           <div class="form-row"><label>MAX_DAILY_LOSS_USD</label><input type="number" step="0.1" name="MAX_DAILY_LOSS_USD" value="{fv('MAX_DAILY_LOSS_USD')}"></div>
           <div class="form-row"><label>SCANNER_INTERVAL_SEC</label><input type="number" name="SCANNER_INTERVAL_SEC" value="{fv('SCANNER_INTERVAL_SEC')}"></div>
           <div class="form-row"><label>SELL_RETRY_ATTEMPTS</label><input type="number" name="SELL_RETRY_ATTEMPTS" value="{fv('SELL_RETRY_ATTEMPTS', 3)}"></div>
@@ -1159,6 +1161,7 @@ def create_admin_app(bot_ref=None) -> FastAPI:
 
         float_keys = {
             "TRADE_AMOUNT_USD", "STOP_LOSS_PCT", "TAKE_PROFIT_PCT", "TRAILING_STOP_PCT",
+            "FEE_USD_ROUNDTRIP", "FEE_PCT_ROUNDTRIP",
             "MAX_DAILY_LOSS_USD", "MIN_TOKEN_AGE_MINUTES", "MAX_TOKEN_AGE_MINUTES",
             "MIN_LIQUIDITY_USD", "MAX_LIQUIDITY_USD", "MIN_MARKET_CAP_USD", "MAX_MARKET_CAP_USD",
             "MIN_VOLUME_5M_USD", "MIN_24H_VOLUME_USD", "MIN_BUY_SELL_RATIO", "MAX_TOP10_HOLDER_PCT",
