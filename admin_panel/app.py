@@ -270,11 +270,14 @@ async def _dashboard_html(bot_ref) -> str:
     open_count = 0
     daily_loss = 0.0
     positions_rows = ""
+    open_pnl_cards = ""
+    unrealized_pnl = 0.0
+    unrealized_known = 0
     if bot_ref and hasattr(bot_ref, "risk"):
         summary = await bot_ref.risk.get_status_summary()
         positions = summary.get("positions", {})
 
-        # Ochiq pozitsiyalar uchun oxirgi narxlarni parallel ravishda yangilaymiz
+        # Ochiq pozitsiyalar uchun oxirgi narxlarni parallel yangilaymiz
         if bot_ref and hasattr(bot_ref, "monitor") and positions:
             async def _update_price(tok: str):
                 try:
@@ -284,44 +287,71 @@ async def _dashboard_html(bot_ref) -> str:
                 except Exception:
                     pass
             await asyncio.gather(*(_update_price(tok) for tok in positions.keys()))
-            # Qayta yuklash
             summary = await bot_ref.risk.get_status_summary()
             positions = summary.get("positions", {})
 
         open_count = summary.get("open_positions", len(positions))
         daily_loss = summary.get("daily_loss_usd", 0.0)
+        from utils.helpers import pnl_percent, pnl_usd as calc_pnl_usd
+
         for token, pos in positions.items():
             entry = float(pos.get("entry_price") or 0)
-            current = pos.get("current_price")
-            if current is not None:
-                current_val = float(current)
-                from utils.helpers import pnl_percent, pnl_usd as calc_pnl_usd
-                amount = float(pos.get("amount_usd") or 0)
+            amount = float(pos.get("amount_usd") or 0)
+            symbol = pos.get("symbol", token[:8])
+            current_raw = pos.get("current_price")
+            try:
+                current_val = float(current_raw) if current_raw is not None else 0.0
+            except (TypeError, ValueError):
+                current_val = 0.0
+
+            if entry > 0 and current_val > 0:
                 pnl_pct = pnl_percent(entry, current_val)
-                pnl_usd = calc_pnl_usd(amount, entry, current_val)
-                pnl_class = "pnl-pos" if pnl_pct >= 0 else "pnl-neg"
-                pnl_text = f"${pnl_usd:+.2f} ({pnl_pct:+.1f}%)"
+                pnl_u = calc_pnl_usd(amount, entry, current_val)
+                unrealized_pnl += pnl_u
+                unrealized_known += 1
+                pnl_class = "pnl-pos" if pnl_u >= 0 else "pnl-neg"
+                arrow = "▲" if pnl_u >= 0 else "▼"
+                pnl_text = f"{arrow} ${pnl_u:+.2f} ({pnl_pct:+.1f}%)"
                 current_text = f"${current_val:.8f}"
+                card_color = "#22c55e" if pnl_u >= 0 else "#ef4444"
             else:
                 pnl_class = "muted"
-                pnl_text = "kutilmoqda..."
-                current_text = "kutilmoqda..."
+                pnl_text = "narx kutilmoqda..."
+                current_text = "—"
+                card_color = "var(--muted)"
+                pnl_pct = 0.0
+                pnl_u = 0.0
+                arrow = "·"
 
             positions_rows += (
-                f"<tr><td><strong>{_esc(pos.get('symbol', token[:8]))}</strong></td>"
+                f"<tr><td><strong>{_esc(symbol)}</strong></td>"
                 f"<td class='mono'>{_esc(token)[:12]}…</td>"
-                f"<td>${float(pos.get('amount_usd') or 0):.2f}</td>"
+                f"<td>${amount:.2f}</td>"
                 f"<td class='mono'>${entry:.8f}</td>"
                 f"<td class='mono'>{current_text}</td>"
-                f"<td class='{pnl_class}'>{pnl_text}</td>"
+                f"<td class='{pnl_class}' style='font-weight:700;font-size:15px'>{pnl_text}</td>"
                 f"<td>{_esc(pos.get('ai_score', '—'))}</td>"
                 f"<td class='muted'>{'PAPER' if pos.get('paper') else 'LIVE'}</td>"
                 f"<td><form class='inline' method='post' action='/dashboard/positions/close' onsubmit=\"return confirm('Pozitsiyani yopishni tasdiqlaysizmi?');\">"
                 f"<input type='hidden' name='token' value='{_esc(token)}'>"
                 f"<button class='stop' type='submit' style='padding:4px 8px;font-size:11px'>Yopish</button></form></td></tr>"
             )
+
+            # Overview dagi katta kartochka
+            open_pnl_cards += f"""
+            <div class="stat" style="border-left:3px solid {card_color}">
+              <div class="label">{_esc(symbol)} · ${amount:.0f}</div>
+              <div class="value" style="font-size:20px;color:{card_color}">{arrow} ${pnl_u:+.2f}</div>
+              <div class="muted" style="margin-top:4px;font-size:12px">{pnl_pct:+.1f}% · entry ${entry:.8g} → {current_text}</div>
+            </div>"""
+
     if not positions_rows:
         positions_rows = '<tr><td colspan="9" class="muted">Ochiq pozitsiya yo\'q</td></tr>'
+    if not open_pnl_cards:
+        open_pnl_cards = '<div class="stat"><div class="label">Ochiq savdo</div><div class="value" style="font-size:14px;color:var(--muted)">Hozircha yo\'q</div></div>'
+
+    u_color = "#22c55e" if unrealized_pnl >= 0 else "#ef4444"
+    u_label = f"${unrealized_pnl:+.2f}" if unrealized_known else "—"
 
     pnl = history.pnl_summary()
     trades = history.list_trades(40)
@@ -429,7 +459,7 @@ async def _dashboard_html(bot_ref) -> str:
 
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MemeBot Pro Admin</title>{PAGE_STYLE}</head><body>
+<title>MemeBot Pro Admin</title><meta http-equiv="refresh" content="30">{PAGE_STYLE}</head><body>
 <div class="layout">
 {_sidebar("overview")}
 <main class="main">
@@ -447,13 +477,19 @@ async def _dashboard_html(bot_ref) -> str:
       <div class="stat"><div class="label">Bot</div><div class="value">{'✅' if running else '🛑'}</div></div>
       <div class="stat"><div class="label">Mode</div><div class="value" style="font-size:16px">{'PAPER' if paper else 'LIVE'}</div></div>
       <div class="stat"><div class="label">Open</div><div class="value">{open_count}/{settings.MAX_OPEN_POSITIONS}</div></div>
+      <div class="stat"><div class="label">Ochiq PnL</div><div class="value" style="font-size:18px;color:{u_color}">{u_label}</div></div>
       <div class="stat"><div class="label">Daily loss</div><div class="value" style="font-size:16px">${daily_loss:.2f}</div></div>
-      <div class="stat"><div class="label">Net PnL</div><div class="value" style="font-size:16px;color:{net_color}">${pnl['net_pnl']:+.2f}</div></div>
+      <div class="stat"><div class="label">Yopilgan Net PnL</div><div class="value" style="font-size:16px;color:{net_color}">${pnl['net_pnl']:+.2f}</div></div>
       <div class="stat"><div class="label">Win rate</div><div class="value" style="font-size:16px">{pnl['win_rate']}%</div></div>
       <div class="stat"><div class="label">Trades</div><div class="value">{pnl['total_trades']}</div></div>
       <div class="stat"><div class="label">Trade $</div><div class="value" style="font-size:16px">${settings.TRADE_AMOUNT_USD:.0f}</div></div>
       <div class="stat"><div class="label">SOL balans</div><div class="value" style="font-size:16px">{wallet_sol:.4f}</div></div>
       <div class="stat"><div class="label">SOL ≈ USD</div><div class="value" style="font-size:16px">${wallet_sol_usd:.2f}</div></div>
+    </div>
+    <div class="card">
+      <h2>📈 Ochiq savdolar (jonli PnL)</h2>
+      <p class="muted" style="margin:0 0 12px;font-size:12px">Yashil = foyda (+) · Qizil = zarar (−). Sahifa yangilanganda DexScreener narxi olinadi.</p>
+      <div class="grid">{open_pnl_cards}</div>
     </div>
     <div class="card">
       <h2>👛 Hamyon</h2>
@@ -1087,5 +1123,84 @@ def create_admin_app(bot_ref=None) -> FastAPI:
             "auto_blacklist": settings.AUTO_BLACKLIST_ENABLED,
             "paper_trading": settings.PAPER_TRADING,
         }
+
+    # ─────────── Oddiy foydalanuvchi (login yo'q) ───────────
+    @app.get("/user", response_class=HTMLResponse)
+    async def user_page(request: Request, token: str = ""):
+        """Public sahifa: status + token tekshirish. Login talab qilinmaydi."""
+        if not getattr(settings, "PUBLIC_BOT_ENABLED", True):
+            return HTMLResponse(
+                "<html><body style='background:#0b0e14;color:#e8eaed;font-family:sans-serif;padding:40px'>"
+                "<h2>Public rejim o'chirilgan</h2><p>Admin PUBLIC_BOT_ENABLED=true qilsin.</p></body></html>",
+                status_code=403,
+            )
+        pnl = history.pnl_summary()
+        open_count = 0
+        if bot_ref and hasattr(bot_ref, "risk"):
+            try:
+                summary = await bot_ref.risk.get_status_summary()
+                open_count = summary.get("open_positions", 0)
+            except Exception:
+                pass
+        analysis = ""
+        tok = (token or "").strip()
+        if tok and len(tok) >= 30 and bot_ref and getattr(bot_ref, "_session", None):
+            try:
+                import aiohttp
+                from scanner.dexscreener import _normalize_pair
+                from utils.helpers import safe_float
+                url = f"https://api.dexscreener.com/latest/dex/tokens/{tok}"
+                async with bot_ref._session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        pairs = data.get("pairs") or []
+                        sol = [p for p in pairs if p.get("chainId") == "solana"]
+                        sol.sort(key=lambda p: safe_float((p.get("liquidity") or {}).get("usd")), reverse=True)
+                        if sol:
+                            pair = _normalize_pair(sol[0])
+                            passed, reason, enriched = await bot_ref.filter_pipeline.run(pair, bot_ref._session)
+                            ai = bot_ref.scorer.score(enriched)
+                            analysis = f"""
+                            <div class="card">
+                              <h2>🔍 Token tahlili: {_esc(enriched.get('symbol','?'))}</h2>
+                              <p><span class="muted">Nomi:</span> {_esc(enriched.get('name','?'))}</p>
+                              <p><span class="muted">Narx:</span> ${enriched.get('price_usd',0):.10f}</p>
+                              <p><span class="muted">Liq:</span> ${enriched.get('liquidity_usd',0):,.0f}
+                                 · <span class="muted">Vol5m:</span> ${enriched.get('volume_5m',0):,.0f}
+                                 · <span class="muted">MC:</span> ${enriched.get('market_cap',0):,.0f}</p>
+                              <p><span class="muted">Filtr:</span> {'✅ O\'tdi' if passed else '❌ O\'tmadi'} — {_esc(reason)}</p>
+                              <p><span class="muted">AI:</span> <strong>{ai.score:.1f}</strong> / 100 · {_esc(ai.recommendation.value)}</p>
+                            </div>"""
+                        else:
+                            analysis = '<div class="card"><p class="muted">Solana juftligi topilmadi</p></div>'
+                    else:
+                        analysis = f'<div class="card"><p class="muted">DexScreener xato: {r.status}</p></div>'
+            except Exception as e:
+                analysis = f'<div class="card"><p class="muted">Xato: {_esc(str(e)[:120])}</p></div>'
+
+        return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MemeBot — Foydalanuvchi</title>{PAGE_STYLE}</head><body>
+<div style="max-width:720px;margin:0 auto;padding:24px">
+  <div class="topbar"><h1>MemeBot Pro <span style="color:var(--muted);font-weight:400">· foydalanuvchi</span></h1>
+    <a href="/login" style="font-size:13px">Admin kirish →</a></div>
+  <div class="grid">
+    <div class="stat"><div class="label">Bot</div><div class="value">{'✅' if settings.BOT_RUNNING else '🛑'}</div></div>
+    <div class="stat"><div class="label">Mode</div><div class="value" style="font-size:15px">{'PAPER' if settings.PAPER_TRADING else 'LIVE'}</div></div>
+    <div class="stat"><div class="label">Ochiq</div><div class="value">{open_count}</div></div>
+    <div class="stat"><div class="label">Net PnL</div><div class="value" style="font-size:15px">${pnl['net_pnl']:+.2f}</div></div>
+    <div class="stat"><div class="label">Win rate</div><div class="value" style="font-size:15px">{pnl['win_rate']}%</div></div>
+    <div class="stat"><div class="label">Savdolar</div><div class="value">{pnl['total_trades']}</div></div>
+  </div>
+  <div class="card">
+    <h2>🔍 Token tekshirish</h2>
+    <form method="get" action="/user" style="display:flex;gap:8px;flex-wrap:wrap">
+      <input name="token" value="{_esc(tok)}" placeholder="Solana mint address..." style="flex:1;min-width:220px;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text)">
+      <button class="ok" type="submit">Tahlil qilish</button>
+    </form>
+  </div>
+  {analysis}
+  <p class="muted" style="margin-top:20px;font-size:12px">Bu sahifa oddiy foydalanuvchilar uchun. Savdo va sozlamalar faqat admin panelda.</p>
+</div></body></html>"""
 
     return app
