@@ -1,5 +1,6 @@
 """DexScreener API — yangi Solana juftliklarini skanerlash."""
 from __future__ import annotations
+import asyncio
 import aiohttp
 from typing import Any, Dict, List, Set
 from utils.logger import logger
@@ -55,10 +56,12 @@ async def fetch_new_pairs(
         logger.warning("[SCAN] Hech qanday token topilmadi")
         return []
 
-    # Token addresslar bo'yicha juftlik ma'lumotlarini olish (30 tadan)
+    # Token addresslar bo'yicha juftliklar (kichik batch — timeout kamayadi)
     results: List[Dict] = []
-    for i in range(0, min(len(token_addresses), 90), 30):
-        batch = token_addresses[i : i + 30]
+    batch_size = 10
+    max_tokens = 60
+    for i in range(0, min(len(token_addresses), max_tokens), batch_size):
+        batch = token_addresses[i : i + batch_size]
         pairs = await _fetch_token_pairs(session, batch, min_liquidity)
         results.extend(pairs)
 
@@ -132,41 +135,41 @@ async def _fetch_token_pairs(
     if not addresses:
         return results
 
-    # 1) Asosiy endpoint: /tokens/v1/solana/{addr1,addr2,...} (max 30)
     url = TOKENS_URL.format(addresses=",".join(addresses))
     pairs_raw: list = []
+    # sock_connect + total — Railway dan DexScreener sekin bo'lishi mumkin
+    timeout = aiohttp.ClientTimeout(total=25, sock_connect=10, sock_read=20)
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+        async with session.get(url, timeout=timeout) as resp:
             if resp.status == 429:
                 logger.warning(
-                    "Token pairs fetch: DexScreener rate-limit (429). "
-                    "SCANNER_INTERVAL_SEC ni oshiring yoki keyinroq qayta uriniladi."
+                    "Token pairs: rate-limit 429 (n=%s). SCANNER_INTERVAL_SEC ni oshiring.",
+                    len(addresses),
                 )
                 return results
             if resp.status != 200:
-                body = ""
-                try:
-                    body = (await resp.text())[:200]
-                except Exception:
-                    pass
                 logger.warning(
-                    "Token pairs fetch HTTP %s (n=%s): %s",
+                    "Token pairs HTTP %s (n=%s): %s",
                     resp.status,
                     len(addresses),
-                    body or resp.reason,
+                    resp.reason,
                 )
             else:
                 data = await resp.json(content_type=None)
                 pairs_raw = data if isinstance(data, list) else (data.get("pairs") or [])
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Token pairs timeout (n=%s) — fallback ishlatiladi",
+            len(addresses),
+        )
+        pairs_raw = await _fetch_token_pairs_fallback(session, addresses)
     except Exception as e:
         logger.warning(
-            "Token pairs fetch xato (%s): %s: %s",
+            "Token pairs xato (%s): %s — fallback",
             type(e).__name__,
             e or repr(e),
-            url[:120],
         )
-        # 2) Fallback: eski endpoint — har bir token alohida (max 5 ta, rate-limit uchun)
-        pairs_raw = await _fetch_token_pairs_fallback(session, addresses[:5])
+        pairs_raw = await _fetch_token_pairs_fallback(session, addresses)
 
     for pair in pairs_raw:
         if not isinstance(pair, dict):
@@ -187,20 +190,28 @@ async def _fetch_token_pairs_fallback(
     session: aiohttp.ClientSession,
     addresses: List[str],
 ) -> list:
-    """Eski /latest/dex/tokens/{addr} endpoint — asosiy API ishlamasa."""
+    """Eski /latest/dex/tokens/{addr} — asosiy API timeout/xato bo'lsa."""
     out: list = []
-    for addr in addresses:
+    timeout = aiohttp.ClientTimeout(total=10, sock_connect=5, sock_read=8)
+
+    async def _one(addr: str) -> list:
         try:
             url = f"https://api.dexscreener.com/latest/dex/tokens/{addr}"
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as resp:
+            async with session.get(url, timeout=timeout) as resp:
                 if resp.status != 200:
-                    continue
+                    return []
                 data = await resp.json(content_type=None)
                 pairs = data.get("pairs") if isinstance(data, dict) else data
-                if isinstance(pairs, list):
-                    out.extend(pairs)
+                return pairs if isinstance(pairs, list) else []
         except Exception:
-            continue
+            return []
+
+    # Parallel, lekin 5 tadan (rate-limit)
+    for i in range(0, len(addresses), 5):
+        chunk = addresses[i : i + 5]
+        parts = await asyncio.gather(*[_one(a) for a in chunk])
+        for p in parts:
+            out.extend(p)
     return out
 
 
