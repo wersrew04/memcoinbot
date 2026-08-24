@@ -131,30 +131,77 @@ async def _fetch_token_pairs(
     results: List[Dict] = []
     if not addresses:
         return results
+
+    # 1) Asosiy endpoint: /tokens/v1/solana/{addr1,addr2,...} (max 30)
     url = TOKENS_URL.format(addresses=",".join(addresses))
+    pairs_raw: list = []
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            if resp.status != 200:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+            if resp.status == 429:
+                logger.warning(
+                    "Token pairs fetch: DexScreener rate-limit (429). "
+                    "SCANNER_INTERVAL_SEC ni oshiring yoki keyinroq qayta uriniladi."
+                )
                 return results
-            data = await resp.json()
-            # API ba'zan list, ba'zan {"pairs": [...]} qaytaradi
-            pairs = data if isinstance(data, list) else (data.get("pairs") or [])
-            for pair in pairs:
-                if not isinstance(pair, dict):
-                    continue
-                if pair.get("chainId") != "solana":
-                    continue
-                liq = safe_float((pair.get("liquidity") or {}).get("usd"))
-                if liq < min_liquidity:
-                    continue
-                # Quote SOL yoki USDC/USDT bo'lsin (oddiy meme juftliklar)
-                quote = (pair.get("quoteToken") or {}).get("symbol", "").upper()
-                if quote not in ("SOL", "WSOL", "USDC", "USDT", ""):
-                    continue
-                results.append(_normalize_pair(pair))
+            if resp.status != 200:
+                body = ""
+                try:
+                    body = (await resp.text())[:200]
+                except Exception:
+                    pass
+                logger.warning(
+                    "Token pairs fetch HTTP %s (n=%s): %s",
+                    resp.status,
+                    len(addresses),
+                    body or resp.reason,
+                )
+            else:
+                data = await resp.json(content_type=None)
+                pairs_raw = data if isinstance(data, list) else (data.get("pairs") or [])
     except Exception as e:
-        logger.warning(f"Token pairs fetch xato: {e}")
+        logger.warning(
+            "Token pairs fetch xato (%s): %s: %s",
+            type(e).__name__,
+            e or repr(e),
+            url[:120],
+        )
+        # 2) Fallback: eski endpoint — har bir token alohida (max 5 ta, rate-limit uchun)
+        pairs_raw = await _fetch_token_pairs_fallback(session, addresses[:5])
+
+    for pair in pairs_raw:
+        if not isinstance(pair, dict):
+            continue
+        if pair.get("chainId") and pair.get("chainId") != "solana":
+            continue
+        liq = safe_float((pair.get("liquidity") or {}).get("usd"))
+        if liq < min_liquidity:
+            continue
+        quote = (pair.get("quoteToken") or {}).get("symbol", "").upper()
+        if quote not in ("SOL", "WSOL", "USDC", "USDT", ""):
+            continue
+        results.append(_normalize_pair(pair))
     return results
+
+
+async def _fetch_token_pairs_fallback(
+    session: aiohttp.ClientSession,
+    addresses: List[str],
+) -> list:
+    """Eski /latest/dex/tokens/{addr} endpoint — asosiy API ishlamasa."""
+    out: list = []
+    for addr in addresses:
+        try:
+            url = f"https://api.dexscreener.com/latest/dex/tokens/{addr}"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as resp:
+                if resp.status != 200:
+                    continue
+                data = await resp.json(content_type=None)
+                pairs = data.get("pairs") if isinstance(data, dict) else data
+                if isinstance(pairs, list):
+                    out.extend(pairs)
+        except Exception:
+            continue
+    return out
 
 
 def _normalize_pair(pair: Dict) -> Dict:
