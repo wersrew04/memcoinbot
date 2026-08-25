@@ -112,6 +112,7 @@ async def fetch_new_pairs(
 async def _from_gecko(session: aiohttp.ClientSession) -> List[Dict]:
     out: List[Dict] = []
     headers = {"Accept": "application/json"}
+    # Avvalo yangi pool'lar; trending faqat yordamchi
     for url in (GECKO_NEW, GECKO_TRENDING):
         try:
             async with session.get(
@@ -129,8 +130,16 @@ async def _from_gecko(session: aiohttp.ClientSession) -> List[Dict]:
                     continue
                 for it in items:
                     n = _norm_gecko(it)
-                    if n:
-                        out.append(n)
+                    if not n:
+                        continue
+                    # Trending dagi juda eski tokenlarni tashla (meme bot uchun)
+                    age = safe_float(n.get("token_age_minutes"))
+                    max_age = float(getattr(settings, "MAX_TOKEN_AGE_MINUTES", 60) or 60)
+                    if max_age > 0 and age > max_age * 3:
+                        # 3x limitdan oshsa (masalan 3 soat) — skip
+                        if url == GECKO_TRENDING:
+                            continue
+                    out.append(n)
         except asyncio.TimeoutError:
             logger.warning("[SCAN] gecko timeout")
         except Exception as e:
@@ -170,6 +179,16 @@ def _norm_gecko(item: Dict) -> Optional[Dict]:
     vol_h24 = attr.get("volume_usd")
     if isinstance(vol_h24, dict):
         vol_h24 = vol_h24.get("h24")
+    vol_1h = safe_float(attr.get("volume_usd_h1"))
+    if vol_1h <= 0 and isinstance(attr.get("volume_usd"), dict):
+        vol_1h = safe_float(attr.get("volume_usd").get("h1"))
+    vol_24 = safe_float(vol_h24)
+    # 5m hajm yo'q — 1h yoki 24h dan taxmin
+    vol_5m = 0.0
+    if vol_1h > 0:
+        vol_5m = vol_1h / 12.0
+    elif vol_24 > 0:
+        vol_5m = vol_24 / 288.0
     pc = attr.get("price_change_percentage")
     pc_h1 = pc.get("h1") if isinstance(pc, dict) else 0
 
@@ -180,9 +199,9 @@ def _norm_gecko(item: Dict) -> Optional[Dict]:
         "pair_address": attr.get("address") or "",
         "price_usd": safe_float(attr.get("base_token_price_usd")),
         "liquidity_usd": liq,
-        "volume_5m": 0.0,
-        "volume_1h": safe_float(attr.get("volume_usd_h1")),
-        "volume_24h": safe_float(vol_h24),
+        "volume_5m": vol_5m,
+        "volume_1h": vol_1h,
+        "volume_24h": vol_24,
         "price_change_5m": 0.0,
         "price_change_1h": safe_float(pc_h1),
         "market_cap": safe_float(attr.get("market_cap_usd") or attr.get("fdv_usd")),
