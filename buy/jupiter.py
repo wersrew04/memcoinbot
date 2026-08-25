@@ -8,10 +8,32 @@ from utils.logger import logger
 from utils.helpers import safe_float
 from config.settings import settings
 
-JUPITER_QUOTE_URL = "https://quote-api.jup.ag/v6/quote"
-JUPITER_SWAP_URL  = "https://quote-api.jup.ag/v6/swap"
+# Eski quote-api.jup.ag/v6 2025-oktyabrda deprecat qilindi.
+# Yangi endpointlar (API key ixtiyoriy — lite; to'liq limit uchun portal.jup.ag):
+JUPITER_QUOTE_URL = "https://lite-api.jup.ag/swap/v1/quote"
+JUPITER_SWAP_URL  = "https://lite-api.jup.ag/swap/v1/swap"
+# API key bo'lsa pro endpoint (yuqori rate limit):
+JUPITER_QUOTE_URL_PRO = "https://api.jup.ag/swap/v1/quote"
+JUPITER_SWAP_URL_PRO  = "https://api.jup.ag/swap/v1/swap"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 LAMPORTS = 1_000_000_000  # 1 SOL
+
+
+def _jupiter_headers() -> Dict[str, str]:
+    headers: Dict[str, str] = {}
+    if settings.JUPITER_API_KEY:
+        # Yangi API x-api-key ishlatadi; eski Bearer ham qoldiriladi.
+        headers["x-api-key"] = settings.JUPITER_API_KEY
+        headers["Authorization"] = "Bearer {}".format(settings.JUPITER_API_KEY)
+    return headers
+
+
+def _quote_url() -> str:
+    return JUPITER_QUOTE_URL_PRO if settings.JUPITER_API_KEY else JUPITER_QUOTE_URL
+
+
+def _swap_url() -> str:
+    return JUPITER_SWAP_URL_PRO if settings.JUPITER_API_KEY else JUPITER_SWAP_URL
 
 
 async def get_quote(
@@ -30,13 +52,11 @@ async def get_quote(
         "onlyDirectRoutes": "false",
         "asLegacyTransaction": "false",
     }
-    headers = {}
-    if settings.JUPITER_API_KEY:
-        headers["Authorization"] = "Bearer {}".format(settings.JUPITER_API_KEY)
+    headers = _jupiter_headers()
 
     try:
         async with session.get(
-            JUPITER_QUOTE_URL, params=params, headers=headers,
+            _quote_url(), params=params, headers=headers,
             timeout=aiohttp.ClientTimeout(total=15)
         ) as r:
             if r.status != 200:
@@ -60,8 +80,7 @@ async def get_swap_transaction(
     Returns: base64 encoded serialized transaction
     """
     headers = {"Content-Type": "application/json"}
-    if settings.JUPITER_API_KEY:
-        headers["Authorization"] = "Bearer {}".format(settings.JUPITER_API_KEY)
+    headers.update(_jupiter_headers())
 
     body = {
         "quoteResponse": quote,
@@ -73,7 +92,7 @@ async def get_swap_transaction(
     }
     try:
         async with session.post(
-            JUPITER_SWAP_URL, json=body, headers=headers,
+            _swap_url(), json=body, headers=headers,
             timeout=aiohttp.ClientTimeout(total=20)
         ) as r:
             if r.status != 200:
