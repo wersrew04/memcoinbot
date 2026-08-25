@@ -51,8 +51,16 @@ class FilterPipeline:
             self._reject(symbol, token, "mcap", f"Katta market cap: ${mc:,.0f}")
             return False, f"Katta market cap: ${mc:,.0f}", data
 
-        # 5. Hajm
+        # 5. Hajm (Gecko/Birdeye ba'zan volume_5m bermaydi → 1h dan taxmin)
         vol5m = safe_float(data.get("volume_5m"))
+        if vol5m <= 0:
+            vol1h = safe_float(data.get("volume_1h"))
+            vol24 = safe_float(data.get("volume_24h"))
+            if vol1h > 0:
+                vol5m = vol1h / 12.0  # 1 soatni 12 ta 5 daqiqaga bo'lish
+            elif vol24 > 0:
+                vol5m = vol24 / 288.0
+            data["volume_5m"] = vol5m
         if vol5m < settings.MIN_VOLUME_5M_USD:
             self._reject(symbol, token, "volume", f"Kam hajm 5m: ${vol5m:,.0f}")
             return False, f"Kam hajm 5m: ${vol5m:,.0f}", data
