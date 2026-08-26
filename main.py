@@ -108,7 +108,7 @@ class MemeBot:
             "TP: <b>{:.0f}%</b> | SL: <b>{:.0f}%</b> | Trail: <b>{:.0f}%</b>\n"
             "AI min: <b>{:.0f}</b>\n\n"
             "Buyruqlar:\n"
-            "/start /stop /positions /status /stats /wallet /sync_wallet"
+            "/start /stop /positions /status /stats /wallet /sync_wallet /close"
             "{}".format(
                 "PAPER" if settings.PAPER_TRADING else "⚠️ LIVE",
                 wallet_info,
@@ -251,6 +251,20 @@ class MemeBot:
                         settings.AI_MIN_SCORE,
                     )
                 )
+                continue
+
+            # Yakuniy scam gate (filter+AI o'tgan bo'lsa ham)
+            gate_ok, gate_reason = await self.filter_pipeline.final_scam_gate(
+                token, enriched.get("symbol", "?"), self._session, enriched
+            )
+            if not gate_ok:
+                n_filter_fail += 1
+                history.add_rejection(
+                    enriched.get("symbol", "?"), token, "scam_gate", gate_reason
+                )
+                logger.warning("[SCAM GATE] {} — {}".format(
+                    enriched.get("symbol", "?"), gate_reason
+                ))
                 continue
 
             # Xarid
