@@ -334,27 +334,136 @@ class TelegramBot:
         await self.notifier.send_message("⏹ <b>Bot to'xtatildi</b>", reply_markup=self._get_inline_keyboard())
 
     async def _cmd_positions(self):
+        """
+        Bot ochgan pozitsiyalar + Phantom (wallet) dagi BARCHA ochiq tokenlarni ko'rsatadi.
+        Bot ochmagan (qo'lda yoki boshqa joydan) pozitsiyalar ham chiqadi.
+        """
         if not self.bot_ref or not hasattr(self.bot_ref, "risk"):
             await self.notifier.send_message("Pozitsiyalar mavjud emas", reply_markup=self._get_inline_keyboard())
             return
+
         positions = await self.bot_ref.risk.get_open_positions()
-        if not positions:
-            await self.notifier.send_message("📭 Ochiq pozitsiyalar yo'q", reply_markup=self._get_inline_keyboard())
-            return
-        lines = ["📊 <b>Ochiq pozitsiyalar:</b>\n"]
-        for tok, pos in positions.items():
-            entry = pos.get("entry_price", 0)
-            curr = pos.get("current_price", entry)
+        tracked_mints = set(positions.keys())
+
+        # Wallet'dagi haqiqiy holdinglar (bot ochmaganlar ham)
+        holdings = []
+        if not settings.PAPER_TRADING and self._session:
+            try:
+                from wallet.keypair import get_pubkey, get_all_token_holdings
+                pubkey = get_pubkey()
+                if pubkey:
+                    holdings = await get_all_token_holdings(self._session, pubkey)
+            except Exception as e:
+                logger.warning(f"Wallet holdings olishda xato: {e}")
+
+        # Stables / wSOL — "pozitsiya" sifatida ko'rsatmaslik (faqat ma'lumot)
+        SKIP_MINTS = {
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+            "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+            "So11111111111111111111111111111111111111112",   # wSOL
+            "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",   # mSOL
+            "7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj",  # stSOL
+            "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",  # BONK (ixtiyoriy — katta holdlar)
+        }
+
+        # Holdinglarni mint bo'yicha indekslash
+        holdings_by_mint = {h["mint"]: h for h in holdings if h.get("mint")}
+
+        lines = ["📊 <b>Ochiq pozitsiyalar (bot + wallet):</b>\n"]
+
+        # 1) Bot kuzatayotgan pozitsiyalar
+        bot_count = 0
+        if positions:
+            lines.append("<b>🤖 Bot kuzatayotgan:</b>")
             from utils.helpers import pnl_percent, pnl_usd as calc_pnl
-            pct = pnl_percent(entry, curr)
-            usd = calc_pnl(pos.get("amount_usd", 0), entry, curr)
-            emoji = "🟢" if pct >= 0 else "🔴"
-            lines.append(
-                f"{emoji} <b>{pos.get('symbol', tok[:8])}</b>\n"
-                f"   Miqdor: ${pos.get('amount_usd', 0):.2f}\n"
-                f"   PnL: ${usd:+.2f} ({pct:+.1f}%)\n"
-                f"   {'PAPER' if pos.get('paper') else 'LIVE'}"
+            for tok, pos in positions.items():
+                entry = pos.get("entry_price", 0)
+                curr = pos.get("current_price", entry)
+                pct = pnl_percent(entry, curr)
+                usd = calc_pnl(pos.get("amount_usd", 0), entry, curr)
+                emoji = "🟢" if pct >= 0 else "🔴"
+                wallet_amt = ""
+                h = holdings_by_mint.get(tok)
+                if h:
+                    wallet_amt = f" | on-chain: {h['ui_amount']:.4f}"
+                lines.append(
+                    f"{emoji} <b>{pos.get('symbol', tok[:8])}</b>\n"
+                    f"   Miqdor: ${pos.get('amount_usd', 0):.2f}{wallet_amt}\n"
+                    f"   PnL: ${usd:+.2f} ({pct:+.1f}%)\n"
+                    f"   {'PAPER' if pos.get('paper') else 'LIVE'} · <code>{tok[:8]}…</code>"
+                )
+                bot_count += 1
+
+        # 2) Wallet'da bor, lekin bot kuzatmayotgan tokenlar
+        external = [
+            h for h in holdings
+            if h.get("mint")
+            and h["mint"] not in tracked_mints
+            and h["mint"] not in SKIP_MINTS
+            and h.get("ui_amount", 0) > 0
+        ]
+
+        if external:
+            lines.append("\n<b>👛 Wallet'da (bot ochmagan):</b>")
+            # Narx/symbol olish (parallel, cheklangan)
+            async def _info(mint: str):
+                symbol = mint[:8]
+                price = 0.0
+                value_usd = 0.0
+                try:
+                    url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
+                    async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=6)) as r:
+                        if r.status == 200:
+                            data = await r.json()
+                            pairs = data.get("pairs") or []
+                            sol_pairs = [p for p in pairs if p.get("chainId") == "solana"] or pairs
+                            if sol_pairs:
+                                best = max(
+                                    sol_pairs,
+                                    key=lambda p: safe_float((p.get("liquidity") or {}).get("usd")),
+                                )
+                                price = safe_float(best.get("priceUsd"))
+                                base = best.get("baseToken") or {}
+                                symbol = base.get("symbol") or symbol
+                except Exception:
+                    pass
+                return symbol, price
+
+            infos = await asyncio.gather(
+                *[_info(h["mint"]) for h in external[:15]],
+                return_exceptions=True,
             )
+            for i, h in enumerate(external[:15]):
+                info = infos[i] if i < len(infos) and not isinstance(infos[i], Exception) else (h["mint"][:8], 0.0)
+                symbol, price = info
+                ui = h.get("ui_amount", 0)
+                value = ui * price if price > 0 else 0.0
+                val_str = f" ≈ ${value:.2f}" if value > 0 else ""
+                lines.append(
+                    f"⚪ <b>{symbol}</b>\n"
+                    f"   Miqdor: {ui:.4f}{val_str}\n"
+                    f"   <code>{h['mint'][:12]}…</code> · kuzatilmayapti"
+                )
+            if len(external) > 15:
+                lines.append(f"\n… va yana {len(external) - 15} ta token")
+
+        if not positions and not external:
+            await self.notifier.send_message(
+                "📭 Ochiq pozitsiyalar yo'q\n"
+                "(bot ham, wallet ham bo'sh yoki faqat stable/wSOL)",
+                reply_markup=self._get_inline_keyboard(),
+            )
+            return
+
+        lines.append(
+            f"\n📦 Jami: bot={bot_count}, wallet-only={len(external)}"
+        )
+        if external:
+            lines.append(
+                "💡 Wallet-only tokenlar uchun TP/SL ishlamaydi. "
+                "Kuzatish uchun /sync_wallet yoki admin panel orqali qo'shing."
+            )
+
         await self.notifier.send_message("\n".join(lines), reply_markup=self._get_inline_keyboard())
 
     async def _cmd_status(self):
