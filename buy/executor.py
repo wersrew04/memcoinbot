@@ -134,24 +134,34 @@ async def _live_buy(
         # TX yuborilgan, lekin tasdiq yo'q — konservativ: xato qaytaramiz
         return False, {"error": "TX tasdiqlanmadi: {}".format(sig)}
 
-    # Haqiqiy token miqdori (out_amount = raw, decimals dan bo'linadi)
-    tokens_received = out_amount  # Monitor narxni hisoblaydi
+    # out_amount = raw (decimals bilan). Jupiter ba'zan outputDecimals bermaydi.
+    decimals = 6
+    try:
+        decimals = int(quote.get("outputDecimals") or quote.get("outDecimals") or 6)
+        # routePlan ichidan ham qidirish
+        if not quote.get("outputDecimals"):
+            for rp in (quote.get("routePlan") or []):
+                swap_info = (rp.get("swapInfo") or {})
+                if swap_info.get("outputMint") == token or swap_info.get("outMint") == token:
+                    pass
+    except Exception:
+        decimals = 6
 
-    # Haqiqiy kirish narxini hisoblash
+    human_tokens = out_amount / (10 ** decimals) if out_amount > 0 else 0.0
+    # Haqiqiy entry: sarflangan USD / olingan token
     actual_price = price
-    if out_amount > 0:
-        try:
-            # Taxminiy narx: lamports / out_amount
-            decimals = int(quote.get("outputDecimals") or 6)
-            actual_price = (lamports / 1_000_000_000) * sol_price / (out_amount / (10 ** decimals))
-        except Exception:
-            pass
+    if human_tokens > 0 and amount_usd > 0:
+        actual_price = amount_usd / human_tokens
+    elif human_tokens > 0 and sol_amount > 0:
+        actual_price = (sol_amount * sol_price) / human_tokens
 
     position = {
         "token": token,
         "symbol": symbol,
         "amount_usd": amount_usd,
-        "tokens_amount": out_amount,
+        "tokens_amount": out_amount,  # raw — sell uchun
+        "tokens_ui": human_tokens,
+        "token_decimals": decimals,
         "entry_price": actual_price,
         "current_price": actual_price,
         "high_price": actual_price,
