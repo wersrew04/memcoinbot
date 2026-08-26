@@ -65,49 +65,92 @@ class FilterPipeline:
             self._reject(symbol, token, "volume", f"Kam hajm 5m: ${vol5m:,.0f}")
             return False, f"Kam hajm 5m: ${vol5m:,.0f}", data
 
-        # 6. Xarid/Sotuv nisbati
+        # 6. Xarid/Sotuv nisbati (Gecko/Birdeye ba'zan bermaydi → 1.0 = noma'lum, skip)
         bsr = safe_float(data.get("buy_sell_ratio"), 1.0)
-        if bsr < settings.MIN_BUY_SELL_RATIO:
+        source = (data.get("source") or "")
+        bsr_unknown = abs(bsr - 1.0) < 1e-9 and source in (
+            "geckoterminal", "birdeye_new", "birdeye_trend", "birdeye"
+        )
+        if not bsr_unknown and bsr < settings.MIN_BUY_SELL_RATIO:
             self._reject(symbol, token, "bsr", f"Nisbat past: {bsr:.1f}")
             return False, f"Xarid/Sotuv nisbati past: {bsr:.1f}", data
 
-        # 7. Birdeye xavfsizlik tekshiruvi
+        # 7. Birdeye xavfsizlik — scam / honeypot / mint-freeze
         if settings.BIRDEYE_API_KEY:
             sec = await get_token_security(session, token)
             ov = await get_token_overview(session, token)
             data["security"] = sec
             data["birdeye_overview"] = ov
 
+            def _truthy(v):
+                return v in (True, "true", "True", "1", 1, "yes", "YES")
+
             if sec:
-                # Honeypot
-                if sec.get("is_honeypot") in (True, "true", "1", 1):
+                # Honeypot / sell taqiqlangan
+                if (
+                    _truthy(sec.get("is_honeypot"))
+                    or _truthy(sec.get("honeypot"))
+                    or _truthy(sec.get("cannotSellAll"))
+                    or _truthy(sec.get("is_sell_restricted"))
+                ):
                     if settings.AUTO_BLACKLIST_ENABLED and settings.BLACKLIST_HONEYPOT:
                         self.blacklist.add(token, "honeypot", source="filter")
-                    self._reject(symbol, token, "security", "Honeypot")
+                    self._reject(symbol, token, "security", "Honeypot / sell restricted")
                     return False, "Honeypot aniqlandi", data
 
-                # Mint / Freeze
-                if sec.get("mint_authority") or sec.get("is_mintable"):
-                    self._reject(symbol, token, "security", "Mint authority faol")
-                    return False, "Mint authority faol", data
-                if sec.get("freeze_authority") or sec.get("is_freezable"):
-                    self._reject(symbol, token, "security", "Freeze authority faol")
-                    return False, "Freeze authority faol", data
+                # Mint / Freeze authority (scam risk)
+                mint_auth = sec.get("mint_authority") or sec.get("is_mintable")
+                freeze_auth = sec.get("freeze_authority") or sec.get("is_freezable")
+                # Bo'sh string / None = authority yo'q (yaxshi); True yoki address = xavfli
+                if mint_auth not in (None, False, "false", "False", "", "null", "None", 0):
+                    if _truthy(mint_auth) or (isinstance(mint_auth, str) and len(mint_auth) > 20):
+                        self._reject(symbol, token, "security", "Mint authority faol")
+                        return False, "Mint authority faol", data
+                if freeze_auth not in (None, False, "false", "False", "", "null", "None", 0):
+                    if _truthy(freeze_auth) or (isinstance(freeze_auth, str) and len(freeze_auth) > 20):
+                        self._reject(symbol, token, "security", "Freeze authority faol")
+                        return False, "Freeze authority faol", data
+
+                # Creator / owner juda katta ulush
+                owner_pct = safe_float(
+                    sec.get("ownerPercentage")
+                    or sec.get("creatorPercentage")
+                    or sec.get("owner_pct")
+                )
+                if owner_pct > 1:
+                    owner_pct /= 100.0
+                if owner_pct > 0.30:
+                    self._reject(symbol, token, "security", f"Creator ulushi {owner_pct*100:.0f}%")
+                    return False, f"Creator ulushi yuqori: {owner_pct*100:.0f}%", data
 
                 # Holderlar
-                holders = safe_int(sec.get("holder_count") or ov.get("holder"))
+                holders = safe_int(sec.get("holder_count") or ov.get("holder") or sec.get("holder"))
                 data["holder_count"] = holders
                 if holders > 0 and holders < settings.MIN_HOLDERS:
                     self._reject(symbol, token, "holders", f"Kam holderlar: {holders}")
                     return False, f"Kam holderlar: {holders}", data
 
                 # Top10
-                top10 = safe_float(sec.get("top10_holder_pct") or sec.get("top10_user_pct"))
+                top10 = safe_float(
+                    sec.get("top10_holder_pct")
+                    or sec.get("top10_user_pct")
+                    or sec.get("top10HolderPercent")
+                )
                 if top10 > 1:
                     top10 /= 100
-                if top10 > settings.MAX_TOP10_HOLDER_PCT:
+                if top10 > 0 and top10 > settings.MAX_TOP10_HOLDER_PCT:
                     self._reject(symbol, token, "holders", f"Top10 yuqori: {top10*100:.0f}%")
                     return False, f"Top10 holder konsentratsiya: {top10*100:.0f}%", data
+            else:
+                # Live rejimda security javobsiz — ehtiyotkorlik bilan rad (scam xavfi)
+                if not settings.PAPER_TRADING:
+                    self._reject(symbol, token, "security", "Birdeye security yo'q")
+                    return False, "Xavfsizlik ma'lumoti yo'q", data
+
+        # 8. Likvidlik vs 5m hajm — juda past faollik (ko'pincha rug/scam)
+        if liq > 0 and vol5m > 0 and vol5m < liq * 0.001 and vol5m < 100:
+            self._reject(symbol, token, "volume", "Likvidlikka nisbatan faollik juda past")
+            return False, "Faollik juda past", data
 
         logger.info(f"[FILTER OK] {symbol} ({token[:8]}…) liq=${liq:,.0f} vol5m=${vol5m:,.0f}")
         return True, "OK", data
