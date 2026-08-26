@@ -284,3 +284,89 @@ class PositionMonitor:
     async def _live_sell_partial(self, token: str, symbol: str, raw_amount: int):
         from sell.jupiter_sell import execute_sell
         await execute_sell(self._session, token, symbol, raw_amount)
+
+    async def force_sell_mint(
+        self,
+        token: str,
+        reason: str = "admin_force",
+        symbol: str = "",
+        amount_usd: float = 0.0,
+        entry_price: float = 0.0,
+        current_price: float = 0.0,
+        tokens_amount: int = 0,
+        paper: bool = False,
+    ):
+        """
+        Bot kuzatayotgan yoki wallet-only tokenni majburan sotish.
+        Risk managerda pozitsiya bo'lmasa ham on-chain dan sotadi.
+        """
+        positions = await self.risk.get_open_positions()
+        if token in positions:
+            pos = positions[token]
+            price = current_price or await self.get_current_price(token) or float(pos.get("current_price") or pos.get("entry_price") or 0)
+            await self.close_position(token, pos, reason, price)
+            return True, "Bot pozitsiyasi yopildi"
+
+        # Wallet-only: on-chain sotish
+        symbol = symbol or token[:8]
+        price = current_price or await self.get_current_price(token) or 0.0
+        is_paper = paper or settings.PAPER_TRADING
+
+        if is_paper:
+            # Paper: faqat risk dan o'chirish (yo'q bo'lsa hech narsa)
+            history.add_trade(
+                symbol=symbol, token=token,
+                pnl_usd=0.0, pnl_pct=0.0,
+                reason=reason, paper=True,
+            )
+            if self.tg and settings.NOTIFY_TELEGRAM:
+                try:
+                    await self.tg.send_message(
+                        "👤 <b>Wallet token yopildi (PAPER)</b>\n\n🪙 <b>{}</b>\n<code>{}</code>".format(
+                            symbol, token[:20] + "..."
+                        )
+                    )
+                except Exception:
+                    pass
+            return True, "PAPER — wallet token belgilandi"
+
+        from sell.jupiter_sell import execute_sell, get_token_raw_amount
+        from wallet.keypair import get_pubkey
+
+        owner = get_pubkey()
+        raw = tokens_amount or 0
+        if not raw or raw < 1:
+            raw = await get_token_raw_amount(self._session, token, owner)
+        if not raw:
+            return False, "Hamyonda token topilmadi (balans 0)"
+
+        ok, sig, sol = await execute_sell(self._session, token, symbol, int(raw))
+        if not ok:
+            return False, "Jupiter sell muvaffaqiyatsiz"
+
+        # Agar risk da bor edi — o'chirish
+        try:
+            await self.risk.close_position(token, 0.0)
+        except Exception:
+            pass
+
+        history.add_trade(
+            symbol=symbol, token=token,
+            pnl_usd=0.0, pnl_pct=0.0,
+            reason=reason, paper=False,
+        )
+        if self.tg and settings.NOTIFY_TELEGRAM:
+            try:
+                await self.tg.send_message(
+                    "✅ <b>Wallet token sotildi</b>\n\n"
+                    "🪙 <b>{}</b>\n"
+                    "💎 ~{:.6f} SOL\n"
+                    "🔗 TX: <code>{}</code>".format(
+                        symbol, sol or 0.0, (sig or "")[:24] + "..."
+                    )
+                )
+            except Exception:
+                pass
+        logger.info("[FORCE SELL] {} tx={}...".format(symbol, (sig or "")[:20]))
+        return True, "Sotildi: {}".format((sig or "")[:20])
+
