@@ -574,7 +574,7 @@ async def _live_snapshot(bot_ref) -> dict:
             })
 
         # Wallet'dagi bot ochmagan tokenlar (Phantom on-chain)
-        if not paper and bot_ref and getattr(bot_ref, "_session", None):
+        if bot_ref and getattr(bot_ref, "_session", None):
             try:
                 from wallet.keypair import get_pubkey, get_all_token_holdings
                 from utils.helpers import safe_float
@@ -787,7 +787,7 @@ async def _dashboard_html(bot_ref) -> str:
             </div>"""
 
         # Wallet-only (bot ochmagan) tokenlar — HTML jadvalga qo'shish
-        if not paper and bot_ref and getattr(bot_ref, "_session", None):
+        if bot_ref and getattr(bot_ref, "_session", None):
             try:
                 from wallet.keypair import get_pubkey, get_all_token_holdings
                 from utils.helpers import safe_float as _sf
@@ -847,7 +847,9 @@ async def _dashboard_html(bot_ref) -> str:
                                 f"<td class='muted'>kuzatilmayapti</td>"
                                 f"<td>—</td>"
                                 f"<td class='muted'>WALLET</td>"
-                                f"<td class='muted' style='font-size:11px' title='Bot ochmagan — TP/SL yo\\'q'>—</td></tr>"
+                                f"<td><form class='inline' method='post' action='/dashboard/positions/close' onsubmit=\"return confirm('Pozitsiyani yopishni tasdiqlaysizmi?');\">"
+                                f"<input type='hidden' name='token' value='{tok_esc}'>"
+                                f"<button class='stop' type='submit' style='padding:4px 8px;font-size:11px'>Yopish</button></form></td></tr>"
                             )
             except Exception:
                 pass
@@ -1372,11 +1374,9 @@ window.mbShow = function(id) {{
               ? ('$' + Number(p2.amount_usd||0).toFixed(2) + (p2.ui_amount ? ' <span class="muted" style="font-size:11px">(' + Number(p2.ui_amount).toFixed(4) + ')</span>' : ''))
               : ('$' + Number(p2.amount_usd||0).toFixed(2));
             var entryTxt = isWallet ? '—' : ('$' + Number(p2.entry_price||0).toFixed(8));
-            var actionCell = isWallet
-              ? '<td class="muted" style="font-size:11px">—</td>'
-              : ('<td><form class="inline" method="post" action="/dashboard/positions/close">' +
+            var actionCell = '<td><form class="inline" method="post" action="/dashboard/positions/close" onsubmit="return confirm(\'Pozitsiyani yopishni tasdiqlaysizmi?\');">' +
                  '<input type="hidden" name="token" value="' + tok + '">' +
-                 '<button class="stop" type="submit" style="padding:4px 8px;font-size:11px">Yopish</button></form></td>');
+                 '<button class="stop" type="submit" style="padding:4px 8px;font-size:11px">Yopish</button></form></td>';
             var copyOnclick = "navigator.clipboard.writeText('" + tok + "');this.textContent='✓';setTimeout(function(){{this.textContent='Copy';}}.bind(this),1200)";
             rows += '<tr' + (isWallet ? ' style="opacity:0.85"' : '') + '><td><strong>' + esc(p2.symbol) + '</strong>' + srcLabel + '</td><td><div class="token-full">' +
               '<a href="https://solscan.io/token/' + tok + '" target="_blank" rel="noopener" title="Solscan">' + tok + '</a>' +
@@ -1536,14 +1536,25 @@ def create_admin_app(bot_ref=None) -> FastAPI:
     async def dash_close_position(request: Request, token: str = Form(...)):
         if r := await _gate(request):
             return r
-        if bot_ref and hasattr(bot_ref, "monitor") and hasattr(bot_ref, "risk"):
-            positions = await bot_ref.risk.get_open_positions()
-            pos = positions.get(token)
-            if pos:
-                price = await bot_ref.monitor.get_current_price(token)
-                if price <= 0:
-                    price = float(pos.get("current_price") or pos.get("entry_price") or 0)
-                await bot_ref.monitor.close_position(token, pos, "admin_force", price)
+        token = (token or "").strip()
+        if not token or not bot_ref or not hasattr(bot_ref, "monitor"):
+            return RedirectResponse(url="/#positions", status_code=303)
+        try:
+            if hasattr(bot_ref.monitor, "force_sell_mint"):
+                ok, msg = await bot_ref.monitor.force_sell_mint(token, reason="admin_force")
+                from utils.logger import logger as _log
+                _log.info("[ADMIN CLOSE] %s ok=%s msg=%s", token[:12], ok, msg)
+            else:
+                positions = await bot_ref.risk.get_open_positions()
+                pos = positions.get(token)
+                if pos:
+                    price = await bot_ref.monitor.get_current_price(token)
+                    if price <= 0:
+                        price = float(pos.get("current_price") or pos.get("entry_price") or 0)
+                    await bot_ref.monitor.close_position(token, pos, "admin_force", price)
+        except Exception as e:
+            from utils.logger import logger as _log
+            _log.error("[ADMIN CLOSE] xato %s: %s", token[:12], e)
         return RedirectResponse(url="/#positions", status_code=303)
 
     @app.post("/dashboard/positions/close-all")
