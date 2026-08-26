@@ -241,6 +241,9 @@ class TelegramBot:
             await self._cmd_wallet()
         elif text == "/sync_wallet":
             await self._cmd_sync_wallet()
+        elif text.startswith("/close"):
+            arg = text.replace("/close", "").strip()
+            await self._cmd_close(arg)
         elif text in ("/clean", "🧹 Tozalash"):
             await self._cmd_clean()
         elif text == "/clean_all":
@@ -347,7 +350,7 @@ class TelegramBot:
 
         # Wallet'dagi haqiqiy holdinglar (bot ochmaganlar ham)
         holdings = []
-        if not settings.PAPER_TRADING and self._session:
+        if self._session:
             try:
                 from wallet.keypair import get_pubkey, get_all_token_holdings
                 pubkey = get_pubkey()
@@ -578,6 +581,76 @@ class TelegramBot:
             "\n".join(lines), reply_markup=self._get_inline_keyboard()
         )
 
+
+    async def _cmd_close(self, token_arg: str = ""):
+        """
+        /close <mint|symbol> — ochiq pozitsiya yoki wallet tokenni yopish.
+        Argument bo'lmasa — ro'yxat + yordam.
+        """
+        if not self.bot_ref or not hasattr(self.bot_ref, "monitor"):
+            await self.notifier.send_message("Monitor mavjud emas", reply_markup=self._get_inline_keyboard())
+            return
+
+        positions = {}
+        if hasattr(self.bot_ref, "risk"):
+            positions = await self.bot_ref.risk.get_open_positions()
+
+        if not token_arg:
+            lines = ["🛑 <b>Pozitsiya yopish</b>\n", "Buyruq: <code>/close MINT_YOKI_SYMBOL</code>\n"]
+            if positions:
+                lines.append("<b>Bot kuzatayotgan:</b>")
+                for t, pos in positions.items():
+                    lines.append(f"• {pos.get('symbol', t[:8])} — <code>/close {t}</code>")
+            # wallet
+            try:
+                from wallet.keypair import get_pubkey, get_all_token_holdings
+                pub = get_pubkey()
+                if pub and self._session:
+                    holds = await get_all_token_holdings(self._session, pub)
+                    SKIP = {
+                        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+                        "So11111111111111111111111111111111111111112",
+                    }
+                    ext = [h for h in holds if h["mint"] not in positions and h["mint"] not in SKIP and h.get("ui_amount", 0) > 0]
+                    if ext:
+                        lines.append("\n<b>Wallet-only:</b>")
+                        for h in ext[:12]:
+                            lines.append(f"• <code>/close {h['mint']}</code> ({h['ui_amount']:.4f})")
+            except Exception:
+                pass
+            await self.notifier.send_message("\n".join(lines), reply_markup=self._get_inline_keyboard())
+            return
+
+        # Resolve symbol → mint
+        token = token_arg.strip()
+        if token not in positions and len(token) < 30:
+            # symbol match
+            for t, pos in positions.items():
+                if str(pos.get("symbol", "")).upper() == token.upper():
+                    token = t
+                    break
+
+        await self.notifier.send_message(f"⏳ Yopilmoqda: <code>{token[:20]}...</code>")
+        try:
+            if hasattr(self.bot_ref.monitor, "force_sell_mint"):
+                ok, msg = await self.bot_ref.monitor.force_sell_mint(token, reason="admin_force")
+            else:
+                pos = positions.get(token)
+                if not pos:
+                    await self.notifier.send_message("❌ Pozitsiya topilmadi", reply_markup=self._get_inline_keyboard())
+                    return
+                price = await self.bot_ref.monitor.get_current_price(token) or float(pos.get("current_price") or pos.get("entry_price") or 0)
+                await self.bot_ref.monitor.close_position(token, pos, "admin_force", price)
+                ok, msg = True, "Yopildi"
+            emoji = "✅" if ok else "❌"
+            await self.notifier.send_message(
+                f"{emoji} <b>Yopish natijasi</b>\n{msg}",
+                reply_markup=self._get_inline_keyboard(),
+            )
+        except Exception as e:
+            await self.notifier.send_message(f"❌ Yopish xatosi: {e}", reply_markup=self._get_inline_keyboard())
+
     async def _cmd_clean(self):
         if self.bot_ref and hasattr(self.bot_ref, "risk"):
             self.bot_ref.risk.clear_cooldowns()
@@ -724,6 +797,14 @@ class TelegramBot:
                 ok, reason = await self.bot_ref.risk.pre_trade_check(token_address, amount)
                 if not ok:
                     return f"❌ Savdo ochilmadi: {reason}"
+
+                # Yakuniy scam gate (filter o'tgan bo'lsa ham)
+                if hasattr(self.bot_ref, "filter_pipeline"):
+                    g_ok, g_reason = await self.bot_ref.filter_pipeline.final_scam_gate(
+                        token_address, symbol, self._session, pair
+                    )
+                    if not g_ok:
+                        return f"❌ Scam/xavfsizlik: {g_reason}"
 
                 # Sotib olish
                 success, position = await execute_buy(
