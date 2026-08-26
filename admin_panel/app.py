@@ -6,6 +6,7 @@ from pathlib import Path
 import asyncio
 from typing import Any, Dict, Optional, List
 
+import aiohttp
 from fastapi import FastAPI, Header, HTTPException, Depends, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
@@ -541,7 +542,9 @@ async def _live_snapshot(bot_ref) -> dict:
         open_count = summary.get("open_positions", len(positions))
         daily_loss = float(summary.get("daily_loss_usd", 0) or 0)
 
+        tracked_mints = set()
         for token, pos in positions.items():
+            tracked_mints.add(token)
             entry = float(pos.get("entry_price") or 0)
             amount = float(pos.get("amount_usd") or 0)
             symbol = pos.get("symbol", token[:8])
@@ -566,7 +569,70 @@ async def _live_snapshot(bot_ref) -> dict:
                 "pnl_pct": round(pct, 2),
                 "ai_score": pos.get("ai_score"),
                 "paper": bool(pos.get("paper")),
+                "source": "bot",
+                "ui_amount": pos.get("tokens_amount"),
             })
+
+        # Wallet'dagi bot ochmagan tokenlar (Phantom on-chain)
+        if not paper and bot_ref and getattr(bot_ref, "_session", None):
+            try:
+                from wallet.keypair import get_pubkey, get_all_token_holdings
+                from utils.helpers import safe_float
+                pub = get_pubkey() or ""
+                if pub:
+                    SKIP = {
+                        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+                        "So11111111111111111111111111111111111111112",
+                        "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",
+                        "7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj",
+                    }
+                    holdings = await get_all_token_holdings(bot_ref._session, pub)
+                    external = [
+                        h for h in holdings
+                        if h.get("mint") and h["mint"] not in tracked_mints
+                        and h["mint"] not in SKIP and h.get("ui_amount", 0) > 0
+                    ][:20]
+
+                    async def _ext_info(mint: str):
+                        symbol, price = mint[:8], 0.0
+                        try:
+                            url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
+                            async with bot_ref._session.get(url, timeout=aiohttp.ClientTimeout(total=6)) as r:
+                                if r.status == 200:
+                                    data = await r.json()
+                                    pairs = data.get("pairs") or []
+                                    sol = [p for p in pairs if p.get("chainId") == "solana"] or pairs
+                                    if sol:
+                                        best = max(sol, key=lambda p: safe_float((p.get("liquidity") or {}).get("usd")))
+                                        price = safe_float(best.get("priceUsd"))
+                                        symbol = (best.get("baseToken") or {}).get("symbol") or symbol
+                        except Exception:
+                            pass
+                        return symbol, price
+
+                    if external:
+                        infos = await asyncio.gather(*[_ext_info(h["mint"]) for h in external], return_exceptions=True)
+                        for i, h in enumerate(external):
+                            info = infos[i] if i < len(infos) and not isinstance(infos[i], Exception) else (h["mint"][:8], 0.0)
+                            symbol, price = info
+                            ui = float(h.get("ui_amount") or 0)
+                            val = ui * price if price > 0 else 0.0
+                            positions_out.append({
+                                "token": h["mint"],
+                                "symbol": symbol,
+                                "amount_usd": round(val, 4),
+                                "entry_price": 0,
+                                "current_price": price,
+                                "pnl_usd": 0,
+                                "pnl_pct": 0,
+                                "ai_score": None,
+                                "paper": False,
+                                "source": "wallet",
+                                "ui_amount": ui,
+                            })
+            except Exception:
+                pass
 
     pnl = history.pnl_summary()
     adv = {}
@@ -654,7 +720,9 @@ async def _dashboard_html(bot_ref) -> str:
         daily_loss = summary.get("daily_loss_usd", 0.0)
         from utils.helpers import pnl_percent, pnl_usd as calc_pnl_usd, net_pnl_usd, net_pnl_percent, roundtrip_fee_usd
 
+        tracked_mints_html = set()
         for token, pos in positions.items():
+            tracked_mints_html.add(token)
             entry = float(pos.get("entry_price") or 0)
             amount = float(pos.get("amount_usd") or 0)
             symbol = pos.get("symbol", token[:8])
@@ -685,7 +753,7 @@ async def _dashboard_html(bot_ref) -> str:
 
             tok_esc = _esc(token)
             positions_rows += (
-                f"<tr><td><strong>{_esc(symbol)}</strong></td>"
+                f"<tr><td><strong>{_esc(symbol)}</strong> <span class='muted' style='font-size:10px'>🤖 bot</span></td>"
                 f"<td><div class='token-full'>"
                 f"<a href='https://solscan.io/token/{tok_esc}' target='_blank' rel='noopener' title='Solscan'>{tok_esc}</a>"
                 f"<button type='button' class='copy-btn' onclick=\"navigator.clipboard.writeText('{tok_esc}');this.textContent='✓';setTimeout(()=>this.textContent='Copy',1200)\">Copy</button>"
@@ -717,6 +785,72 @@ async def _dashboard_html(bot_ref) -> str:
               <div><span class="sym">{_esc(symbol)}</span><span class="amt">${amount:.0f}</span></div>
               <div class="pnl-val wait">narx kutilmoqda…</div>
             </div>"""
+
+        # Wallet-only (bot ochmagan) tokenlar — HTML jadvalga qo'shish
+        if not paper and bot_ref and getattr(bot_ref, "_session", None):
+            try:
+                from wallet.keypair import get_pubkey, get_all_token_holdings
+                from utils.helpers import safe_float as _sf
+                _pub = get_pubkey() or ""
+                if _pub:
+                    _SKIP = {
+                        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+                        "So11111111111111111111111111111111111111112",
+                        "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",
+                        "7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj",
+                    }
+                    _holdings = await get_all_token_holdings(bot_ref._session, _pub)
+                    _ext = [
+                        h for h in _holdings
+                        if h.get("mint") and h["mint"] not in tracked_mints_html
+                        and h["mint"] not in _SKIP and h.get("ui_amount", 0) > 0
+                    ][:15]
+
+                    async def _ext_info_html(mint: str):
+                        symbol, price = mint[:8], 0.0
+                        try:
+                            url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
+                            async with bot_ref._session.get(url, timeout=aiohttp.ClientTimeout(total=6)) as r:
+                                if r.status == 200:
+                                    data = await r.json()
+                                    pairs = data.get("pairs") or []
+                                    sol = [p for p in pairs if p.get("chainId") == "solana"] or pairs
+                                    if sol:
+                                        best = max(sol, key=lambda p: _sf((p.get("liquidity") or {}).get("usd")))
+                                        price = _sf(best.get("priceUsd"))
+                                        symbol = (best.get("baseToken") or {}).get("symbol") or symbol
+                        except Exception:
+                            pass
+                        return symbol, price
+
+                    if _ext:
+                        _infos = await asyncio.gather(*[_ext_info_html(h["mint"]) for h in _ext], return_exceptions=True)
+                        for i, h in enumerate(_ext):
+                            info = _infos[i] if i < len(_infos) and not isinstance(_infos[i], Exception) else (h["mint"][:8], 0.0)
+                            symbol, price = info
+                            ui = float(h.get("ui_amount") or 0)
+                            val = ui * price if price > 0 else 0.0
+                            tok_esc = _esc(h["mint"])
+                            price_txt = f"${price:.8f}" if price > 0 else "—"
+                            val_txt = f"${val:.2f}" if val > 0 else "—"
+                            positions_rows += (
+                                f"<tr style='opacity:0.85'><td><strong>{_esc(symbol)}</strong> "
+                                f"<span class='muted' style='font-size:10px'>👛 wallet</span></td>"
+                                f"<td><div class='token-full'>"
+                                f"<a href='https://solscan.io/token/{tok_esc}' target='_blank' rel='noopener'>{tok_esc}</a>"
+                                f"<button type='button' class='copy-btn' onclick=\"navigator.clipboard.writeText('{tok_esc}');this.textContent='✓';setTimeout(()=>this.textContent='Copy',1200)\">Copy</button>"
+                                f"</div></td>"
+                                f"<td>{val_txt} <span class='muted' style='font-size:11px'>({ui:.4f})</span></td>"
+                                f"<td class='mono muted'>—</td>"
+                                f"<td class='mono'>{price_txt}</td>"
+                                f"<td class='muted'>kuzatilmayapti</td>"
+                                f"<td>—</td>"
+                                f"<td class='muted'>WALLET</td>"
+                                f"<td class='muted' style='font-size:11px' title='Bot ochmagan — TP/SL yo\\'q'>—</td></tr>"
+                            )
+            except Exception:
+                pass
 
     if not positions_rows:
         positions_rows = '<tr><td colspan="9" class="muted">Ochiq pozitsiya yo\'q</td></tr>'
@@ -1191,12 +1325,13 @@ window.mbShow = function(id) {{
       var cards = document.getElementById('open-pnl-cards');
       if (cards) {{
         var pos = d.positions || [];
-        if (!pos.length) {{
+        var botPos = pos.filter(function(p) {{ return p.source !== 'wallet'; }});
+        if (!botPos.length) {{
           cards.innerHTML = '<div class="pnl-card wait"><div class="pnl-val wait">Hozircha ochiq savdo yo\'q</div></div>';
         }} else {{
           var html = '';
-          for (var i = 0; i < pos.length; i++) {{
-            var p = pos[i];
+          for (var i = 0; i < botPos.length; i++) {{
+            var p = botPos[i];
             var ok = (p.current_price || 0) > 0 && (p.entry_price || 0) > 0;
             var side = !ok ? 'wait' : (p.pnl_usd >= 0 ? 'pos' : 'neg');
             var absPnl = Math.abs(Number(p.pnl_usd || 0)).toFixed(2);
@@ -1225,23 +1360,32 @@ window.mbShow = function(id) {{
           var rows = '';
           for (var k = 0; k < pos2.length; k++) {{
             var p2 = pos2[k];
-            var ok2 = (p2.current_price || 0) > 0 && (p2.entry_price || 0) > 0;
-            var cls = !ok2 ? 'muted' : (p2.pnl_usd >= 0 ? 'pnl-pos' : 'pnl-neg');
-            var pnl2 = !ok2 ? '...' : money(p2.pnl_usd) + ' (' + Number(p2.pnl_pct).toFixed(1) + '%)';
-            var cur2 = ok2 ? ('$' + Number(p2.current_price).toFixed(8)) : '-';
+            var isWallet = (p2.source === 'wallet');
+            var ok2 = !isWallet && (p2.current_price || 0) > 0 && (p2.entry_price || 0) > 0;
+            var cls = isWallet ? 'muted' : (!ok2 ? 'muted' : (p2.pnl_usd >= 0 ? 'pnl-pos' : 'pnl-neg'));
+            var pnl2 = isWallet ? 'kuzatilmayapti' : (!ok2 ? '...' : money(p2.pnl_usd) + ' (' + Number(p2.pnl_pct).toFixed(1) + '%)');
+            var cur2 = (p2.current_price || 0) > 0 ? ('$' + Number(p2.current_price).toFixed(8)) : '-';
             var tok = esc(p2.token || '');
+            var srcLabel = isWallet ? ' <span class="muted" style="font-size:10px">👛 wallet</span>' : ' <span class="muted" style="font-size:10px">🤖 bot</span>';
+            var modeLabel = isWallet ? 'WALLET' : (p2.paper ? 'PAPER' : 'LIVE');
+            var amtTxt = isWallet
+              ? ('$' + Number(p2.amount_usd||0).toFixed(2) + (p2.ui_amount ? ' <span class="muted" style="font-size:11px">(' + Number(p2.ui_amount).toFixed(4) + ')</span>' : ''))
+              : ('$' + Number(p2.amount_usd||0).toFixed(2));
+            var entryTxt = isWallet ? '—' : ('$' + Number(p2.entry_price||0).toFixed(8));
+            var actionCell = isWallet
+              ? '<td class="muted" style="font-size:11px">—</td>'
+              : ('<td><form class="inline" method="post" action="/dashboard/positions/close">' +
+                 '<input type="hidden" name="token" value="' + tok + '">' +
+                 '<button class="stop" type="submit" style="padding:4px 8px;font-size:11px">Yopish</button></form></td>');
             var copyOnclick = "navigator.clipboard.writeText('" + tok + "');this.textContent='✓';setTimeout(function(){{this.textContent='Copy';}}.bind(this),1200)";
-            rows += '<tr><td><strong>' + esc(p2.symbol) + '</strong></td><td><div class="token-full">' +
+            rows += '<tr' + (isWallet ? ' style="opacity:0.85"' : '') + '><td><strong>' + esc(p2.symbol) + '</strong>' + srcLabel + '</td><td><div class="token-full">' +
               '<a href="https://solscan.io/token/' + tok + '" target="_blank" rel="noopener" title="Solscan">' + tok + '</a>' +
               '<button type="button" class="copy-btn" onclick="' + copyOnclick + '">Copy</button>' +
-              '</div></td><td>$' + Number(p2.amount_usd||0).toFixed(2) +
-              '</td><td class="mono">$' + Number(p2.entry_price||0).toFixed(8) +
+              '</div></td><td>' + amtTxt +
+              '</td><td class="mono">' + entryTxt +
               '</td><td class="mono">' + cur2 + '</td><td class="' + cls + '" style="font-weight:700">' +
               pnl2 + '</td><td>' + esc(p2.ai_score != null ? p2.ai_score : '-') +
-              '</td><td class="muted">' + (p2.paper ? 'PAPER' : 'LIVE') +
-              '</td><td><form class="inline" method="post" action="/dashboard/positions/close">' +
-              '<input type="hidden" name="token" value="' + tok + '">' +
-              '<button class="stop" type="submit" style="padding:4px 8px;font-size:11px">Yopish</button></form></td></tr>';
+              '</td><td class="muted">' + modeLabel + '</td>' + actionCell + '</tr>';
           }}
           tbody.innerHTML = rows;
         }}
