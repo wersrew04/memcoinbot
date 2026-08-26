@@ -115,7 +115,7 @@ class PositionMonitor:
         amount_usd = safe_float(pos.get("amount_usd"))
         is_paper = pos.get("paper", True)
 
-        # Sof PnL: gross - round-trip fee (Phantom/Solana)
+        # Taxminiy PnL (bozor narxi). Live da keyinroq haqiqiy SOL bilan qayta hisoblanadi.
         fee = roundtrip_fee_usd(amount_usd)
         gross_usd = pnl_usd(amount_usd, entry, price)
         pnl_usd_val = gross_usd - fee
@@ -131,6 +131,29 @@ class PositionMonitor:
             if not sell_ok:
                 logger.error("[SELL FAIL] {} — qayta uriniladi keyingi siklda".format(symbol))
                 return  # Pozitsiyani ochiq qoldirish, keyingi siklda qayta urinish
+            # Haqiqiy PnL: olingan SOL * narx - sarflangan USD
+            try:
+                from wallet.keypair import get_sol_price_usd
+                sol_px = await get_sol_price_usd(self._session) if self._session else 0.0
+                if sol_px <= 0:
+                    sol_px = 150.0
+                sol_spent = safe_float(pos.get("sol_spent"))
+                if sol_spent <= 0 and amount_usd > 0 and sol_px > 0:
+                    sol_spent = amount_usd / sol_px
+                if sol_received > 0:
+                    received_usd = sol_received * sol_px
+                    spent_usd = sol_spent * sol_px if sol_spent > 0 else amount_usd
+                    pnl_usd_val = received_usd - spent_usd
+                    pnl_pct_val = (pnl_usd_val / spent_usd * 100.0) if spent_usd > 0 else 0.0
+                    # Chiqish narxini ham yangilash
+                    ui = safe_float(pos.get("tokens_ui"))
+                    if ui <= 0 and safe_float(pos.get("tokens_amount")) > 0:
+                        dec = int(pos.get("token_decimals") or 6)
+                        ui = safe_float(pos.get("tokens_amount")) / (10 ** dec)
+                    if ui > 0 and received_usd > 0:
+                        price = received_usd / ui
+            except Exception as e:
+                logger.debug("live PnL qayta hisoblash: %s", e)
 
         # Pozitsiyani bazadan o'chirish
         closed_pos = await self.risk.close_position(token, pnl_usd_val)
